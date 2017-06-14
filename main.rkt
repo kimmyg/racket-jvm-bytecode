@@ -359,12 +359,14 @@
   (let ([instr (read-instruction ip)])
     (if instr (cons instr (read-bytecode ip)) null)))
 
+(struct exception (start-pc end-pc handler-pc catch-type) #:transparent)
+
 (define (read-code ip)
   (define (read-exception ip)
-    `(exception ,(read-u2 ip)
-                ,(read-u2 ip)
-                ,(read-u2 ip)
-                ,(read-u2 ip)))
+    (exception (read-u2 ip)
+               (read-u2 ip)
+               (read-u2 ip)
+               (read-u2 ip)))
   (define max-stack (read-u2 ip))
   (define max-locals (read-u2 ip))
   (define bytecode (read-bytecode (open-input-bytes (read-bytes (read-u4 ip) ip))))
@@ -380,26 +382,32 @@
          ,exception-table
          ,attributes))
 
+(struct class (name) #:transparent)
+(struct fieldref (class name-and-type) #:transparent)
+(struct interface-methodref (class name-and-type) #:transparent)
+(struct methodref (class name-and-type) #:transparent)
+(struct name-and-type (name type) #:transparent)
+
 (define (resolve-constant c constant-pool)
   (match c
     [`(class-info ,name-index)
-     `(class ,(look-up-constant name-index constant-pool))]
+     (class (look-up-constant name-index constant-pool))]
     [`(double-info ,x) x]
     [`(fieldref-info ,class-index ,name-and-type-index)
-     `(fieldref ,(look-up-constant class-index constant-pool)
-                ,(look-up-constant name-and-type-index constant-pool))]
+     (fieldref (look-up-constant class-index constant-pool)
+               (look-up-constant name-and-type-index constant-pool))]
     [`(float-info ,x) x]
     [`(integer-info ,x) x]
     [`(interface-methodref-info ,class-index ,name-and-type-index)
-     `(interface-methodref ,(look-up-constant class-index constant-pool)
-                           ,(look-up-constant name-and-type-index constant-pool))]
+     (interface-methodref (look-up-constant class-index constant-pool)
+                          (look-up-constant name-and-type-index constant-pool))]
     [`(long-info ,x) x]
     [`(name-and-type-info ,name-index ,descriptor-index)
-     `(name-and-type ,(look-up-constant name-index constant-pool)
-                     ,(look-up-constant descriptor-index constant-pool))]
+     (name-and-type (look-up-constant name-index constant-pool)
+                    (look-up-constant descriptor-index constant-pool))]
     [`(methodref-info ,class-index ,name-and-type-index)
-     `(methodref ,(look-up-constant class-index constant-pool)
-                 ,(look-up-constant name-and-type-index constant-pool))]
+     (methodref (look-up-constant class-index constant-pool)
+                (look-up-constant name-and-type-index constant-pool))]
     [`(string-info ,string-index)
      (look-up-constant string-index constant-pool)]
     [`(utf-8-info ,x) x]))
@@ -524,10 +532,26 @@
          (cons instr (loop instrs stack)))]))
   (map resolve-instruction bytecode))
 
+(struct annotation (type element-value-pairs) #:transparent)
+
 (define (resolve-annotation annotation constant-pool)
   (match-let ([(list type-index element-value-pairs) annotation])
-    (list (look-up-constant type-index constant-pool)
-          element-value-pairs)))
+    (annotation (look-up-constant type-index constant-pool)
+                element-value-pairs)))
+
+(struct line-number (start-pc line-number) #:transparent)
+(struct local-variable (start-pc length name descriptor index) #:transparent)
+(struct local-variable-type (start-pc length name descriptor index) #:transparent)
+
+(struct top-variable-info () #:transparent)
+(struct integer-variable-info () #:transparent)
+(struct float-variable-info () #:transparent)
+(struct double-variable-info () #:transparent)
+(struct long-variable-info () #:transparent)
+(struct null-variable-info () #:transparent)
+(struct uninitialized-this-variable-info () #:transparent)
+(struct object-variable-info (class) #:transparent)
+(struct uninitialized-variable-info (offset) #:transparent)
 
 (define (resolve-attribute attribute constant-pool)
   (match-let ([`(attribute-info ,name-index ,payload) attribute])
@@ -553,26 +577,26 @@
        (cons 'LineNumberTable
              (let ([ip (open-input-bytes payload)])
                (for/list ([i (in-range (read-u2 ip))])
-                 (list (read-u2 ip)
-                       (read-u2 ip))))) ]
+                 (line-number (read-u2 ip)
+                              (read-u2 ip))))) ]
       ["LocalVariableTable"
        (cons 'LocalVariableTable
              (let ([ip (open-input-bytes payload)])
                (for/list ([i (in-range (read-u2 ip))])
-                 (list (read-u2 ip)
-                       (read-u2 ip)
-                       (look-up-constant (read-u2 ip) constant-pool)
-                       (look-up-constant (read-u2 ip) constant-pool)
-                       (read-u2 ip)))))]
+                 (local-variable (read-u2 ip)
+                                 (read-u2 ip)
+                                 (look-up-constant (read-u2 ip) constant-pool)
+                                 (look-up-constant (read-u2 ip) constant-pool)
+                                 (read-u2 ip)))))]
       ["LocalVariableTypeTable"
        (cons 'LocalVariableTypeTable
              (let ([ip (open-input-bytes payload)])
                (for/list ([i (in-range (read-u2 ip))])
-                 (list (read-u2 ip)
-                       (read-u2 ip)
-                       (look-up-constant (read-u2 ip) constant-pool)
-                       (look-up-constant (read-u2 ip) constant-pool)
-                       (read-u2 ip)))))]
+                 (local-variable-type (read-u2 ip)
+                                      (read-u2 ip)
+                                      (look-up-constant (read-u2 ip) constant-pool)
+                                      (look-up-constant (read-u2 ip) constant-pool)
+                                      (read-u2 ip)))))]
       ["RuntimeInvisibleAnnotations"
        (cons 'RuntimeInvisibleAnnotations
              payload
@@ -600,15 +624,15 @@
        (define (read-verification-type-info ip)
          (let ([tag (read-byte ip)])
            (cond
-             [(= tag 0) '(top-variable-info)]
-             [(= tag 1) '(integer-variable-info)]
-             [(= tag 2) '(float-variable-info)]
-             [(= tag 3) '(double-variable-info)]
-             [(= tag 4) '(long-variable-info)]
-             [(= tag 5) '(null-variable-info)]
-             [(= tag 6) '(uninitialized-this-variable-info)]
-             [(= tag 7) `(object-variable-info ,(look-up-constant (read-u2 ip) constant-pool))]
-             [(= tag 8) `(uninitialized-variable-info ,(read-u2 ip))]
+             [(= tag 0) (top-variable-info)]
+             [(= tag 1) (integer-variable-info)]
+             [(= tag 2) (float-variable-info)]
+             [(= tag 3) (double-variable-info)]
+             [(= tag 4) (long-variable-info)]
+             [(= tag 5) (null-variable-info)]
+             [(= tag 6) (uninitialized-this-variable-info)]
+             [(= tag 7) (object-variable-info (look-up-constant (read-u2 ip) constant-pool))]
+             [(= tag 8) (uninitialized-variable-info (read-u2 ip))]
              [else
               (error 'read-verification-type-info "bad tag ~a" tag)])))
        (define (read-stack-map-frame ip)
@@ -639,14 +663,20 @@
       ["Synthetic"
        (cons 'Synthetic #t)])))
 
-(define (resolve-code code constant-pool)
-  (match-let ([`(code ,max-stack ,max-locals ,bytecode ,exception-table ,attributes) code])
-    `(code ,max-stack
-           ,max-locals
-           ,(resolve-bytecode bytecode constant-pool)
-           ,exception-table
-           ,(for/list ([attribute (in-list attributes)])
-              (resolve-attribute attribute constant-pool)))))
+(struct code (max-stack max-locals bytecode exception-table attributes) #:transparent)
+
+(define (resolve-code code* constant-pool)
+  (match-let ([`(code ,max-stack ,max-locals ,bytecode ,exception-table ,attributes) code*])
+    (code max-stack
+          max-locals
+          (resolve-bytecode bytecode constant-pool)
+          exception-table
+          (for/list ([attribute (in-list attributes)])
+            (resolve-attribute attribute constant-pool)))))
+
+(struct jvm-class (this super access-flags interfaces fields methods) #:transparent)
+(struct jvm-field (access-flags name descriptor attributes) #:transparent)
+(struct jvm-method (access-flags name descriptor attributes) #:transparent)
 
 (define resolve-class
   (match-lambda
@@ -654,35 +684,35 @@
            constant-pool
            access-flags this-class super-class
            interfaces fields methods attributes)
-     (list (look-up-constant this-class constant-pool)
-           (look-up-constant super-class constant-pool)
-           (for/list ([v (in-list '(#x1 #x10 #x20 #x200 #x400 #x1000 #x2000 #x4000))]
-                      [p (in-list '(PUBLIC FINAL SUPER INTERFACE ABSTRACT SYNTHETIC ANNOTATION ENUM))]
-                      #:when (not (zero? (bitwise-and access-flags v))))
-             p)
-           (for/list ([interface (in-list interfaces)])
-             (match-let ([`(class-info ,name-index) interface])
-               (look-up-constant name-index constant-pool)))
-           (for/list ([field (in-list fields)])
-             (match-let ([`(field-info ,access-flags ,name-index ,descriptor-index ,attributes) field])
-               (list (for/list ([v (in-list '(#x1 #x2 #x4 #x8 #x10 #x20 #x40 #x80 #x1000 #x4000))]
-                                [p (in-list '(PUBLIC PRIVATE PROTECTED STATIC FINAL VOLATILE TRANSIENT SYNTHETIC ENUM))]
-                                #:when (not (zero? (bitwise-and access-flags v))))
-                       p)
-                     (look-up-constant name-index constant-pool)
-                     (look-up-constant descriptor-index constant-pool)
-                     (for/list ([attribute (in-list attributes)])
-                       (resolve-attribute attribute constant-pool)))))
-           (for/list ([method (in-list methods)])
-             (match-let ([`(method-info ,access-flags ,name-index ,descriptor-index ,attributes) method])
-               (list (for/list ([v (in-list '(#x1 #x2 #x4 #x8 #x10 #x20 #x40 #x80 #x100 #x400 #x800 #x1000))]
-                                [p (in-list '(PUBLIC PRIVATE PROTECTED STATIC FINAL SYNCHRONIZED BRIDGE VARARGS NATIVE ABSTRACT STRICT SYNTHETIC))]
-                                #:when (not (zero? (bitwise-and access-flags v))))
-                       p)
-                     (look-up-constant name-index constant-pool)
-                     (look-up-constant descriptor-index constant-pool)
-                     (for/list ([attribute (in-list attributes)])
-                       (resolve-attribute attribute constant-pool))))))]))
+     (jvm-class (look-up-constant this-class constant-pool)
+                (look-up-constant super-class constant-pool)
+                (for/list ([v (in-list '(#x1 #x10 #x20 #x200 #x400 #x1000 #x2000 #x4000))]
+                           [p (in-list '(PUBLIC FINAL SUPER INTERFACE ABSTRACT SYNTHETIC ANNOTATION ENUM))]
+                           #:when (not (zero? (bitwise-and access-flags v))))
+                  p)
+                (for/list ([interface (in-list interfaces)])
+                  (match-let ([`(class-info ,name-index) interface])
+                    (look-up-constant name-index constant-pool)))
+                (for/list ([field (in-list fields)])
+                  (match-let ([`(field-info ,access-flags ,name-index ,descriptor-index ,attributes) field])
+                    (jvm-field (for/list ([v (in-list '(#x1 #x2 #x4 #x8 #x10 #x20 #x40 #x80 #x1000 #x4000))]
+                                          [p (in-list '(PUBLIC PRIVATE PROTECTED STATIC FINAL VOLATILE TRANSIENT SYNTHETIC ENUM))]
+                                          #:when (not (zero? (bitwise-and access-flags v))))
+                                 p)
+                               (look-up-constant name-index constant-pool)
+                               (look-up-constant descriptor-index constant-pool)
+                               (for/list ([attribute (in-list attributes)])
+                                 (resolve-attribute attribute constant-pool)))))
+                (for/list ([method (in-list methods)])
+                  (match-let ([`(method-info ,access-flags ,name-index ,descriptor-index ,attributes) method])
+                    (jvm-method (for/list ([v (in-list '(#x1 #x2 #x4 #x8 #x10 #x20 #x40 #x80 #x100 #x400 #x800 #x1000))]
+                                           [p (in-list '(PUBLIC PRIVATE PROTECTED STATIC FINAL SYNCHRONIZED BRIDGE VARARGS NATIVE ABSTRACT STRICT SYNTHETIC))]
+                                           #:when (not (zero? (bitwise-and access-flags v))))
+                                  p)
+                                (look-up-constant name-index constant-pool)
+                                (look-up-constant descriptor-index constant-pool)
+                                (for/list ([attribute (in-list attributes)])
+                                  (resolve-attribute attribute constant-pool))))))]))
 
 (require racket/file
          racket/system)
@@ -706,6 +736,6 @@
 
 (for ([path (in-directory class-path)]
       #:when (regexp-match? #rx"\\.class$" path))
-  (void pretty-print (resolve-class (call-with-input-file path read-class))))
+  (pretty-print (resolve-class (call-with-input-file path read-class))))
 
 
