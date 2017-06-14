@@ -236,7 +236,11 @@
     (code max-stack
           max-locals
           (resolve-bytecode bytecode constant-pool)
-          (map (λ (arguments) (apply exception arguments)) exception-table)
+          (map
+           (match-lambda
+             [(list start-pc end-pc handler-pc catch-type)
+              (exception start-pc end-pc handler-pc (look-up-constant catch-type constant-pool))])
+           exception-table)
           (for/list ([attribute (in-list attributes)])
             (resolve-attribute attribute constant-pool)))))
 

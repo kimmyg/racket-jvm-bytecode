@@ -8,59 +8,13 @@
          "resolve.rkt"
          "instruction.rkt")
 
+(require "extract.rkt")
 
-
-
-
-
-
-(require racket/file
-         racket/system)
-
-(define (extract base-path)
-  (let ([base-temp-path (match (regexp-match #rx"([^/]*)$" base-path)
-                          [(list _ key)
-                           (build-path (find-system-path 'temp-dir) key)])])
-    (for ([path (in-directory base-path)])
-      (match (regexp-match #rx"([^/]*)\\.jar$" path)
-        [(list _ base)
-         (let ([base-temp-subpath (build-path base-temp-path base)])
-           (make-directory* base-temp-subpath)
-           (parameterize ([current-directory base-temp-subpath])
-             (system (format "unzip -u -qq ~s" (path->string path)))))]
-        [#f
-         (void)]))
-    (for/list ([path (in-directory base-temp-path)]
-               #:when (regexp-match? #rx"\\.class$" path))
-      (λ (f) (call-with-input-file path f)))))
-
-#;
-(define (extract-classes key . classpaths)
-  (let ([base-path (build-path (find-system-path 'temp-dir) key)])
-    (for* ([classpath (in-list classpaths)]
-           [path (in-list (directory-list classpath #:build? #t))])
-      (match path
-        [(app path->string (regexp #rx"([^/]*)\\.jar$" (list _ base)))
-         (let ([temp-subpath (build-path base-path base)])
-           (make-directory* temp-subpath)
-           (parameterize ([current-directory temp-subpath])
-             (system (format "unzip -u  ~s" (path->string path)))))] ; add -qq to unzip
-        [_ (void)]))
-    base-path))
-
-(extract )
-
-#;(define jar-dir "/Users/kimballg/Development/STAC/challenge_programs/malware_analyzer/challenge_program")
-#;(define class-path (extract-classes "malware-analyzer" jar-dir))
-
-#;(define jar-dir "/Users/kimballg/Development/STAC/challenge_programs/airplan_1/challenge_program/lib")
-#;(define class-path (extract-classes "airplan-1" jar-dir))
-
-(define app-path "/Users/kimballg/Development/STAC/challenge_programs/airplan_1")
+(define app-path "/Users/kimballg/Development/STAC/challenge_programs/malware_analyzer")
 
 (define classes
-  (for/list ([call-with-class-stream (in-list (extract app-path))])
-    (resolve-class (call-with-class-stream read-class))))
+  (for/list ([call-with-class-input-stream (in-list (extract app-path))])
+    (resolve-class (call-with-class-input-stream read-class))))
 
 (define (classes-with-main cs)
   (filter
@@ -78,6 +32,19 @@
     [(list m) m]
     [_ (error 'method/name "multiple methods with name ~s" name)]))
 
+(require "descriptor.rkt")
+
+(for*/list ([c (in-list classes)]
+            [f (in-list (jvm-class-fields c))])
+  (parse-field-descriptor (jvm-field-descriptor f)))
+
+#;
+(match (classes-with-main classes)
+  [(list c)
+   (parse-method-descriptor (jvm-method-descriptor (method/name c "main")))])
+
+
+#|
 (require "hierarchy.rkt")
 #;
 (for-each register-class! classes)
@@ -163,4 +130,4 @@
 (loops m)
 
 
-
+|#
