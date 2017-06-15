@@ -4,7 +4,7 @@
 (define-match-expander family
   (syntax-rules ()
     [(_ pattern opcode)
-     (and opcode (app symbol->string (regexp pattern (not #f))))]
+     (? symbol? and opcode (app symbol->string (regexp pattern (not #f))))]
     [(_ pattern opcode arguments ...)
      (list (and opcode (app symbol->string (regexp pattern (not #f)))) arguments ...)]))
 

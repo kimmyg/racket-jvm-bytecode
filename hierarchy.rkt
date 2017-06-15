@@ -30,6 +30,6 @@
 
 #;(query-rows conn "SELECT ifn, count(*) FROM implements GROUP BY ifn;")
 #;(query-rows conn "SELECT scn, count(*) FROM subclasses GROUP BY scn;")
-
-
-
+#;
+(query-rows conn "WITH RECURSIVE trans ( cn, tscn ) AS (
+                    SELECT cn, scn FROM subclasses UNION ALL SELECT trans.cn")

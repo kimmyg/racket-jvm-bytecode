@@ -32,11 +32,16 @@
     [(list m) m]
     [_ (error 'method/name "multiple methods with name ~s" name)]))
 
+(require "loop.rkt")
+
 (require "descriptor.rkt")
 
-(for*/list ([c (in-list classes)]
-            [f (in-list (jvm-class-fields c))])
-  (parse-field-descriptor (jvm-field-descriptor f)))
+(for* ([c (in-list classes)]
+            [m (in-list (jvm-class-methods c))]
+            #:when (assq 'Code (jvm-method-attributes m)))
+  ((current-print) (loops m)))
+
+
 
 #;
 (match (classes-with-main classes)
@@ -49,9 +54,6 @@
 #;
 (for-each register-class! classes)
 
-#;
-(query-rows conn "WITH RECURSIVE trans ( cn, tscn ) AS (
-                    SELECT cn, scn FROM subclasses UNION ALL SELECT trans.cn")
 #;
 (code-bytecode (cdr (assq 'Code (jvm-method-attributes m))))
 
@@ -89,42 +91,6 @@
 (require racket/set)
 
 
-(define (loops m)
-  (define (blocks instrs)
-    (define (block-boundaries instrs)
-      (define (pred prev next dest-pc)
-        (match next
-          [(cons (instruction (== dest-pc) _) _) next]
-          [_ (pred (cdr prev) (cons (car prev) next) dest-pc)]))
-      (define (succ prev next dest-pc)
-        (match next
-          [(cons (instruction (== dest-pc) _) _) next]
-          [_ (succ (cons (car next) prev) (cdr next) dest-pc)]))
-      (let loop ([boundaries (set)]
-                 [prev null]
-                 [next instrs])
-        (match next
-          [(cons (and instr (instruction pc instr*)) next*)
-           (loop (match instr*
-                   [(family #rx"^if" _ offset)
-                    (set-add (set-add boundaries next)
-                             (if (< offset 0)
-                               (pred prev next (+ pc offset))
-                               (succ prev next (+ pc offset))))]
-                   [_ boundaries])
-                 (cons instr prev) next*)]
-          [(list) boundaries])))
-    (let ([bs (block-boundaries instrs)])
-      (let loop ([block null]
-                 [instrs instrs])
-        (match instrs
-          [(cons instr instrs*)
-           (if (set-member? bs instrs)
-             (cons (reverse block) (loop (list instr) instrs*))
-             (loop (cons instr block) instrs*))]
-          [(list)
-           (list (reverse block))]))))
-  (blocks (code-bytecode (cdr (assq 'Code (jvm-method-attributes m))))))
 
 #;
 (loops m)
