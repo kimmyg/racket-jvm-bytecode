@@ -84,8 +84,69 @@
               (if (and (set-member? jump-destinations pc) (not (= pc block-pc)))
                 (s₁ todo seen (add-edge -> block-pc pc) pc block)
                 (s₁ todo seen -> block-pc block))]))]))
-    (s₀ (list 0) (seteqv) (hasheqv)))
-  (values (jumps (code-bytecode (cdr (assq 'Code (jvm-method-attributes m)))))))
+    (let* ([goto (s₀ (list 0) (seteqv) (hasheqv))]
+           [comefrom (for*/fold ([<- (hasheqv)]) ([(src-pc dst-pcs) (in-hash goto)]
+                                                  [dst-pc (in-list dst-pcs)])
+                       (add-edge <- dst-pc src-pc))])
+      (values goto comefrom)))
+  (define (blocks goto)
+    (set-add (apply seteqv (apply append (hash-values goto))) 0))
+  (define (dominators goto comefrom)
+    (let* ([blocks (blocks goto)]
+           [non-root-blocks (set-remove blocks 0)])
+      (define dominators
+        (let ([dominators (for/hasheqv ([n (in-set non-root-blocks)])
+                            (values n blocks))])
+          (hash-set dominators 0 (seteqv 0))))
+      (let loop ([dominators dominators])
+        (let-values ([(dominators changed?)
+                      (for/fold ([dominators dominators]
+                                 [changed? #f])
+                                ([n (in-set non-root-blocks)])
+                        (let ([d (set-add (for/fold ([d blocks]) ([pred-n (in-list (hash-ref comefrom n))])
+                                            (set-intersect d (hash-ref dominators pred-n)))
+                                          n)])
+                          (values (hash-set dominators n d) (or changed? (not (equal? d (hash-ref dominators n)))))))])
+          (if changed? (loop dominators) dominators)))))
+  
+  (let-values ([(goto comefrom) (jumps (code-bytecode (cdr (assq 'Code (jvm-method-attributes m)))))])
+    ((current-print) goto)
+
+    (define (loop-body en ex)
+      (let loop ([body (seteqv en)]
+                 [todo (list ex)])
+        (match todo
+          [(list) body]
+          [(cons n todo)
+           (if (set-member? body n)
+             (loop body todo)
+             (loop (set-add body n)
+                   (for/fold ([todo todo]) ([n (in-list (hash-ref comefrom n))])
+                     (set-add todo n))))])))
+    
+    (let ([dominators (dominators goto comefrom)])
+
+      (for/hasheqv ([b (in-set (blocks goto))])
+        (let ([d (hash-ref dominators b)])
+          (values b (for/list ([succ-b (hash-ref goto b null)]
+                               #:when (set-member? d succ-b))
+                      (loop-body succ-b b)))))
+      
+      #;
+      (for/fold ([loops (hash)])
+                ([b (in-set (blocks goto))])
+        (define headers
+          (let ([dominators (hash-ref dominators b)])
+            (for/list ([succ-b (hash-ref goto b null)]
+                       #:when (set-member? dominators succ-b))
+              succ-b)))
+
+        (for/fold ([loops loops]) ([header (in-list headers)])
+          (hash-update loops header (λ (body) (append body (loop-body header b))) null))))))
+    
+    
+
+
 
 (provide loops)
 
