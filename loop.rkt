@@ -7,6 +7,23 @@
 (define (loops m)
   (define (jumps instrs)
     ((current-print) instrs)
+    (define jump-destinations
+      (for/fold ([jds (seteqv)]) ([instr (in-list instrs)])
+        (match instr
+          [(instruction pc instr)
+           (match instr
+             [(or (family #rx"^goto" _ offset)
+                  (family #rx"^jsr" _ offset)
+                  (family #rx"^if" _ offset))
+              (set-add jds (+ pc offset))]
+             [`(lookupswitch ,default-offset ,pairs)
+              (for/fold ([jds (set-add jds (+ pc default-offset))]) ([pair (in-list pairs)])
+                (match-let ([(list _ offset) pair])
+                  (set-add jds (+ pc offset))))]
+             [`(tableswitch ,default-offset ,_ ,_ ,offsets)
+              (for/fold ([jds (set-add jds (+ pc default-offset))]) ([offset (in-list offsets)])
+                (set-add jds (+ pc offset)))]
+             [_ jds])])))
     (define sequences
       (let loop ([sequences (hasheqv)]
                  [instrs instrs])
@@ -64,35 +81,11 @@
              [(family #rx"throw$" _)
               (s₀ todo seen ->)]
              [_
-              (s₁ todo seen -> block-pc block)]))]))
+              (if (and (set-member? jump-destinations pc) (not (= pc block-pc)))
+                (s₁ todo seen (add-edge -> block-pc pc) pc block)
+                (s₁ todo seen -> block-pc block))]))]))
     (s₀ (list 0) (seteqv) (hasheqv)))
-  (define (blockify jumps)
-    ((current-print) jumps)
-    (define (find-glb ys x)
-      (match-let ([(cons y ys) ys])
-        (if (< y x) y (find-glb ys x))))
-    (define (insert ys x)
-      (match-let ([(cons y ys*) ys])
-        (if (< y x) (cons x ys) (cons y (insert ys* x)))))
-    (define (interpose h k₀ k₁)
-      (let ([vs₀ (hash-ref h k₀)])
-        (hash-set (hash-set h k₀ (list k₁)) k₁ vs₀)))
-    (let-values ([(jumps _)
-                  (for*/fold ([jumps jumps]
-                              [boundaries (sort (hash-keys jumps) >)])
-                             ([(source-pc dest-pcs) (in-hash jumps)]
-                              [dest-pc (in-list dest-pcs)])
-                    (cond
-                      [(hash-has-key? jumps dest-pc)
-                       (values jumps boundaries)]
-                      [(> dest-pc source-pc)
-                       (values jumps boundaries)]
-                      [else
-                       (let ([pred-pc (find-glb boundaries dest-pc)])
-                        (values (interpose jumps pred-pc dest-pc)
-                                (insert boundaries dest-pc)))]))])
-      jumps))
-  (blockify (jumps (code-bytecode (cdr (assq 'Code (jvm-method-attributes m)))))))
+  (values (jumps (code-bytecode (cdr (assq 'Code (jvm-method-attributes m)))))))
 
 (provide loops)
 
