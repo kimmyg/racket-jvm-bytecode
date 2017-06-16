@@ -36,12 +36,13 @@
 
 (require "descriptor.rkt")
 
-#;
 (for* ([c (in-list classes)]
-            [m (in-list (jvm-class-methods c))]
-            #:when (assq 'Code (jvm-method-attributes m)))
+       [m (in-list (jvm-class-methods c))]
+       #:when (assq 'Code (jvm-method-attributes m)))
+  ((current-print) (jvm-method-name m))
   ((current-print) (loops m)))
 
+#;
 (match (classes-with-main classes)
   [(list c)
    ((current-print) (loops (method/name c "main")))])

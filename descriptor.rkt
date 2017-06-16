@@ -55,15 +55,15 @@
 (provide (all-defined-out))
 
 (module+ stack-action
-  (require racket/list)
+  (require "symbolic-stack.rkt")
   
-  (define (perform-descriptor descriptor stack)
+  (define (perform-descriptor! descriptor stack)
     (match-let ([(method-descriptor parameters return)
                  (parse-method-descriptor descriptor)])
-      (let-values ([(arguments stack) (split-at stack (length parameters))])
-        (values arguments
-                  (match return
-                    [(return-void) stack]
-                    [(return-field f) (cons f stack)])))))
+      (begin0
+        (stack-pop!* stack (length parameters))
+        (match return
+          [(return-void) (void)]
+          [(return-field f) (stack-push! stack f)]))))
 
   (provide (all-defined-out)))
