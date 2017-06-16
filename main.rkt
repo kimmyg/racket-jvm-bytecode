@@ -39,6 +39,7 @@
 (for* ([c (in-list classes)]
        [m (in-list (jvm-class-methods c))]
        #:when (assq 'Code (jvm-method-attributes m)))
+  ((current-print) (jvm-class-this c))
   ((current-print) (jvm-method-name m))
   ((current-print) (loops m)))
 

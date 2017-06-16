@@ -60,10 +60,9 @@
   (define (perform-descriptor! descriptor stack)
     (match-let ([(method-descriptor parameters return)
                  (parse-method-descriptor descriptor)])
-      (begin0
-        (stack-pop!* stack (length parameters))
-        (match return
-          [(return-void) (void)]
-          [(return-field f) (stack-push! stack f)]))))
+      (values (stack-pop!* stack (length parameters))
+              (match return
+                [(return-void) 'void]
+                [(return-field f) `(field ,f)]))))
 
   (provide (all-defined-out)))

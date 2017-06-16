@@ -142,7 +142,7 @@
       (unless (zero? r)
         (read-bytes (- n r) ip)))))
 
-(define (read-instruction ip)
+(define (read-instruction ip get-pc)
   (match (read-u1 ip)
     [(? eof-object?) #f]
     [1   'aconst-null]
@@ -292,20 +292,21 @@
     [150 'fcmpg]
     [151 'dcmpl]
     [152 'dcmpg]
-    [153 `(ifeq ,(read-s2 ip))]
-    [154 `(ifne ,(read-s2 ip))]
-    [155 `(iflt ,(read-s2 ip))]
-    [156 `(ifge ,(read-s2 ip))]
-    [157 `(ifgt ,(read-s2 ip))]
-    [158 `(ifle ,(read-s2 ip))]
-    [159 `(if-icmpeq ,(read-s2 ip))]
-    [160 `(if-icmpne ,(read-s2 ip))]
-    [161 `(if-icmplt ,(read-s2 ip))]
-    [162 `(if-icmpge ,(read-s2 ip))]
-    [163 `(if-icmpgt ,(read-s2 ip))]
-    [164 `(if-icmple ,(read-s2 ip))]
-    [165 `(if-acmpeq ,(read-s2 ip))]
-    [166 `(if-acmpne ,(read-s2 ip))]
+    [153
+     `(ifeq ,(read-s2 ip) ,(get-pc ip))]
+    [154 `(ifne ,(read-s2 ip) ,(get-pc ip))]
+    [155 `(iflt ,(read-s2 ip) ,(get-pc ip))]
+    [156 `(ifge ,(read-s2 ip) ,(get-pc ip))]
+    [157 `(ifgt ,(read-s2 ip) ,(get-pc ip))]
+    [158 `(ifle ,(read-s2 ip) ,(get-pc ip))]
+    [159 `(if-icmpeq ,(read-s2 ip) ,(get-pc ip))]
+    [160 `(if-icmpne ,(read-s2 ip) ,(get-pc ip))]
+    [161 `(if-icmplt ,(read-s2 ip) ,(get-pc ip))]
+    [162 `(if-icmpge ,(read-s2 ip) ,(get-pc ip))]
+    [163 `(if-icmpgt ,(read-s2 ip) ,(get-pc ip))]
+    [164 `(if-icmple ,(read-s2 ip) ,(get-pc ip))]
+    [165 `(if-acmpeq ,(read-s2 ip) ,(get-pc ip))]
+    [166 `(if-acmpne ,(read-s2 ip) ,(get-pc ip))]
     [167 `(goto ,(read-s2 ip))]
     [168 `(jsr ,(read-s2 ip))]
     [169 `(ret ,(read-u1 ip))]
@@ -350,16 +351,18 @@
            [opc `(wide ,(match opc)
                        ,(read-u2 ip))])]
     [197 `(multianewarray ,(read-u2 ip) ,(read-u1 ip))]
-    [198 `(ifnull ,(read-s2 ip))]
-    [199 `(ifnonnull ,(read-s2 ip))]
+    [198 `(ifnull ,(read-s2 ip) ,(get-pc ip))]
+    [199 `(ifnonnull ,(read-s2 ip) ,(get-pc ip))]
     ))
 
 (define (read-bytecode ip)
   (define (port-location ip) (let-values ([(_₀ _₁ p) (port-next-location ip)]) (sub1 p)))
-  (define base-pc (port-location ip))
+  (define get-pc
+    (let ([base-pc (port-location ip)])
+      (λ (ip) (- (port-location ip) base-pc))))
   (define (read-bytecode ip)
-    (let ([pc (- (port-location ip) base-pc)]
-          [instr (read-instruction ip)])
+    (let ([pc (get-pc ip)]
+          [instr (read-instruction ip get-pc)])
       (if instr (cons (list pc instr) (read-bytecode ip)) null)))
   (read-bytecode ip))
 

@@ -10,6 +10,7 @@
   (match-define (code max-stack max-locals bytecode exception-table attributes)
     (cdr (assq 'Code (jvm-method-attributes m))))
   (define (costs instrs)
+    #;((current-print) instrs) 
     (define jump-destinations
       (for/fold ([jds (seteqv)]) ([instr (in-list instrs)])
         (match instr
@@ -52,11 +53,14 @@
                (family #rx"^jsr"  _ offset))
            (let ([dest-pc (+ pc offset)])
              (done (list dest-pc) dest-pc))]
-          [(family #rx"^if" opcode offset)
-           (let ([dest-pc (+ pc offset)]
-                 [succ-pc (match-let ([(cons (instruction pc _) _) block]) pc)])
+          [(family #rx"^if-icmp(eq|ge|gt|le|lt|ne)$" opcode offset succ-pc)
+           (let ([dest-pc (+ pc offset)])
+             (match-define (list v₀ v₁) (stack-pop!* stack 2))
+             (done (list succ-pc dest-pc) `(branch (,opcode ,v₀ ,v₁) ,dest-pc ,succ-pc)))]
+          [(family #rx"^if" opcode offset succ-pc)
+           (let ([dest-pc (+ pc offset)])
              (define v (stack-pop! stack))
-             (done (list succ-pc dest-pc) `(if (,opcode ,v) ,dest-pc ,succ-pc)))]
+             (done (list succ-pc dest-pc) `(branch (,opcode ,v) ,dest-pc ,succ-pc)))]
           [`(lookupswitch ,default-offset ,pairs)
            (done (cons (+ pc default-offset)
                        (for/list ([pair (in-list pairs)])
@@ -108,9 +112,6 @@
                #;
                [(family #rx"^if-acmp(eq|ne)$" opcode offset)
                 (list opcode offset)]
-               #;
-               [(family #rx"^if-icmp(eq|ge|gt|le|lt|ne)$" opcode offset)
-                (list opcode offset)]
           [`(anewarray ,type)
            (define count (stack-pop! stack))
            (stack-push! stack `(anewarray ,type ,count))
@@ -147,53 +148,72 @@
                #;
                [`(wide-iinc ,index ,const)
                 `(wide-iinc ,index ,const)]
-               #;
-               [`(instanceof ,index)
-                `(instanceof ,(look-up-constant index constant-pool))]
+          [`(instanceof ,class)
+           (define objectref (stack-pop! stack))
+           (stack-push! stack `(instanceof ,objectref ,class))
+           (not-done #f)]
           [`(invokeinterface ,method ,count)
            (define objectref (stack-pop! stack))
-           (define arguments (match-let ([(methodref _ (name-and-type _ descriptor)) method])
-                               (perform-descriptor! descriptor stack)))
-           (not-done `(invokeinterface ,objectref ,method ,arguments))]
+           (define-values (arguments result)
+             (match-let ([(methodref _ (name-and-type _ descriptor)) method])
+               (perform-descriptor! descriptor stack)))
+           (define token (gensym 'token))
+           (match result
+             ['void (void)]
+             [`(field ,f) (stack-push! stack `(result ,token ,f))])
+           (not-done `(invokeinterface ,objectref ,method ,arguments ,token))]
           [`(invokespecial ,method)
            (define objectref (stack-pop! stack))
-           (define arguments (match-let ([(methodref _ (name-and-type _ descriptor)) method])
-                               (perform-descriptor! descriptor stack)))
-           (not-done `(invokespecial ,objectref ,method ,arguments))]
+           (define-values (arguments result)
+             (match-let ([(methodref _ (name-and-type _ descriptor)) method])
+               (perform-descriptor! descriptor stack)))
+           (define token (gensym 'token))
+           (match result
+             ['void (void)]
+             [`(field ,f) (stack-push! stack `(result ,token ,f))])
+           (not-done `(invokespecial ,objectref ,method ,arguments ,token))]
           [`(invokestatic ,method)
-           (define arguments (match-let ([(methodref _ (name-and-type _ descriptor)) method])
-                               (perform-descriptor! descriptor stack)))
-           (not-done `(invokestatic ,method ,arguments))]
+           (define-values (arguments result)
+             (match-let ([(methodref _ (name-and-type _ descriptor)) method])
+               (perform-descriptor! descriptor stack)))
+           (define token (gensym 'token))
+           (match result
+             ['void (void)]
+             [`(field ,f) (stack-push! stack `(result ,token ,f))])
+           (not-done `(invokestatic ,method ,arguments ,token))]
           [`(invokevirtual ,method)
            (define objectref (stack-pop! stack))
-           (define arguments (match-let ([(methodref _ (name-and-type _ descriptor)) method])
-                               (perform-descriptor! descriptor stack)))
-           (not-done `(invokevirtual ,objectref ,method ,arguments))]
+           (define-values (arguments result)
+             (match-let ([(methodref _ (name-and-type _ descriptor)) method])
+               (perform-descriptor! descriptor stack)))
+           (define token (gensym 'token))
+           (match result
+             ['void (void)]
+             [`(field ,f) (stack-push! stack `(result ,token ,f))])
+           (not-done `(invokevirtual ,objectref ,method ,arguments ,token))]
           [`(getfield ,field)
            (define objectref (stack-pop! stack))
-           (stack-push! stack `(getfield ,objectref ,field))
-           (displayln "getting an instance field; should keep track of gets and puts")
-           (not-done #f)]
+           (define token (gensym 'token))
+           (stack-push! stack `(access-token ,token))
+           (not-done `(getfield ,objectref ,field ,token))]
           [`(putfield ,field)
            (match-define (list objectref v) (stack-pop!* stack 2))
-           (displayln "putting an instance field; should keep track of gets and puts")
-           (not-done #f)]
+           (not-done `(putfield ,objectref ,field ,v))]
           [`(getstatic ,field)
-           (stack-push! stack `(getstatic ,field))
-           (printf "UNSOUND: need to track putstatic\n")
-           (not-done #f)]
+           (define token (gensym 'token))
+           (stack-push! stack `(access-token ,token))
+           (not-done `(getstatic ,field ,token))]
           [`(putstatic ,field)
            (define v (stack-pop! stack))
-           (printf "EFFECT: ~v\n" `(putstatic ,field ,v))
-           (not-done #f)]
+           (not-done `(putstatic ,field ,v))]
           [(family #rx".aload$" opcode)
            (match-define (list arrayref index) (stack-pop!* stack 2))
-           (stack-push! stack `(,opcode ,arrayref ,index))
-           (not-done #f)]
+           (define token (gensym 'token))
+           (stack-push! stack `(access-token ,token))
+           (not-done `(,opcode ,arrayref ,index ,token))]
           [(family #rx".astore$" opcode)
            (match-define (list arrayref index value) (stack-pop!* stack 3))
-           (printf "EFFECT: ~v\n" `(,opcode ,arrayref ,index ,value))
-           (not-done #f)]
+           (not-done `(,opcode ,arrayref ,index ,value))]
           ['aconst-null
            (stack-push! stack 'null)
            (not-done #f)]
@@ -213,6 +233,11 @@
           ['pop
            (stack-pop! stack)
            (not-done #f)]
+          ['pop2
+           (define v (stack-pop! stack))
+           (stack-pop! stack)
+           (printf "POSSIBLY UNSOUND if ~v is a long or double\n" v)
+           (not-done #f)]
           ; unary operators
           [(and opcode (or 'd2l
                            'dneg
@@ -224,9 +249,9 @@
           ; binary operators
           [(and opcode (or 'dcmpg 'dcmpl
                            'dadd 'ddiv 'dmul
-                           'iadd 'iand 'idiv 'imul 'isub
+                           'iadd 'iand 'idiv 'imul 'ior 'isub
                            'lcmp
-                           'ladd 'lmul))
+                           'ladd 'lmul 'lsub))
            (match-define (list v₀ v₁) (stack-pop!* stack 2))
            (stack-push! stack `(,opcode ,v₀ ,v₁))
            (not-done #f)]
@@ -246,13 +271,45 @@
           ))
       (match block
         [(cons (instruction pc instr) block)
-         (if (and (set-member? jump-destinations pc) (not (= simple-cost 1)))
+         (if (and (set-member? jump-destinations pc) (not (zero? simple-cost)))
            (values (list pc) simple-cost (cons pc etc))
            (let ([simple-cost (add1 simple-cost)])
              (s₂ pc instr
                  (λ (c) (s₁ block locals stack simple-cost (if c (cons c etc) etc)))
                  (λ (more-todo c) (values more-todo simple-cost (if c (cons c etc) etc))))))]))
-    (s₀ (list 0) (seteqv) (hasheqv)))
+    (define (reduce h)
+      h
+      #;
+      (for/hasheqv ([(pc summary) (in-hash h)])
+        (match-let ([(list simple-cost (cons r es)) summary])
+          (values pc `(+ ,simple-cost ,r . ,(let loop ([es es])
+                                           (match es
+                                             [(cons e es)
+                                              (match e
+                                                [(or `(invokespecial ,_ ,method ,_ ,_)
+                                                     `(invokestatic ,method ,_ ,_)
+                                                     `(invokevirtual ,_ ,method ,_ ,_)
+                                                     `(invokeinterface ,_ ,method ,_ ,_))
+                                                 (cons (equal-hash-code e) (loop es))]
+                                                [(or `(getstatic . ,_)
+                                                     `(putstatic . ,_)
+                                                     `(getfield . ,_)
+                                                     `(putfield . ,_)
+                                                     `(aastore . ,_)
+                                                     `(bastore . ,_)
+                                                     `(iaload . ,_)
+                                                     `(iastore . ,_)
+                                                     `(aaload . ,_)
+                                                     `(baload . ,_))
+                                                 (loop es)])]
+                                             [(list) (list)]))
+                         ))))
+      #;
+      (let-values ([(key value) (hash-iterate-key+value h (hash-iterate-first h))])
+        (match value))
+      
+      )
+    (reduce (s₀ (list 0) (seteqv) (hasheqv))))
   (costs bytecode))
     
     

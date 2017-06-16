@@ -42,12 +42,12 @@
        (list opcode index constant)]
       [(family #rx"^(a|d|f|i|l)store$" opcode n)
        (list opcode n)]
-      [(family #rx"^if(eq|ge|gt|le|lt|ne|nonnull|null)" opcode offset)
-       (list opcode offset)]
-      [(family #rx"^if-acmp(eq|ne)$" opcode offset)
-       (list opcode offset)]
-      [(family #rx"^if-icmp(eq|ge|gt|le|lt|ne)$" opcode offset)
-       (list opcode offset)]
+      [(family #rx"^if(eq|ge|gt|le|lt|ne|nonnull|null)" opcode offset succ-pc)
+       (list opcode offset succ-pc)]
+      [(family #rx"^if-acmp(eq|ne)$" opcode offset succ-pc)
+       (list opcode offset succ-pc)]
+      [(family #rx"^if-icmp(eq|ge|gt|le|lt|ne)$" opcode offset succ-pc)
+       (list opcode offset succ-pc)]
       [`(anewarray ,index)
        `(anewarray ,(look-up-constant index constant-pool))]
       [`(bipush ,n)
