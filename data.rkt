@@ -5,8 +5,8 @@
 
 (struct class (name) #:transparent)
 (struct fieldref (class name-and-type) #:transparent)
-(struct interface-methodref (class name-and-type) #:transparent)
 (struct methodref (class name-and-type) #:transparent)
+(struct interface-methodref methodref () #:transparent)
 (struct name-and-type (name type) #:transparent)
 
 (struct annotation (type element-value-pairs) #:transparent)

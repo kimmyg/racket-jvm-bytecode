@@ -53,3 +53,17 @@
      (parse-return-descriptor ip))))
 
 (provide (all-defined-out))
+
+(module+ stack-action
+  (require racket/list)
+  
+  (define (perform-descriptor descriptor stack)
+    (match-let ([(method-descriptor parameters return)
+                 (parse-method-descriptor descriptor)])
+      (let-values ([(arguments stack) (split-at stack (length parameters))])
+        (values arguments
+                  (match return
+                    [(return-void) stack]
+                    [(return-field f) (cons f stack)])))))
+
+  (provide (all-defined-out)))

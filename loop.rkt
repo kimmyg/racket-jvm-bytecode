@@ -2,11 +2,15 @@
 (require racket/match
          racket/set
          "data.rkt"
-         "instruction.rkt")
+         "instruction.rkt"
+         (submod "descriptor.rkt" stack-action))
+
+(struct indeterminate-stack (map ))
 
 (define (loops m)
-  (define (jumps instrs)
-    ((current-print) instrs)
+  (match-define (code max-stack max-locals bytecode exception-table attributes)
+    (cdr (assq 'Code (jvm-method-attributes m))))
+  (define (costs instrs)
     (define jump-destinations
       (for/fold ([jds (seteqv)]) ([instr (in-list instrs)])
         (match instr
@@ -33,116 +37,248 @@
                  instrs*)]
           [(list)
            sequences])))
-    (define (add-edge -> pc₀ pc₁)
-      (hash-update -> pc₀ (λ (pcs) (cons pc₁ pcs)) null))
-    (define (s₀ todo seen ->)
+    (define (s₀ todo seen costs)
       (match todo
         [(cons pc todo)
          (if (set-member? seen pc)
-           (s₀ todo seen ->)
-           (s₁ todo seen -> pc (hash-ref sequences pc)))]
+           (s₀ todo seen costs)
+           (let-values ([(more-todo simple-cost etc) (s₁ (hash-ref sequences pc) (apply vector (build-list max-locals (λ (i) `(local ,i)))) null 0 null)])
+             (s₀ (append more-todo todo) (set-add seen pc) (hash-set costs pc (list simple-cost etc)))))]
         [(list)
-         ->]))
-    (define (s₁ todo seen -> block-pc block)
-      (match block
-        [(cons (instruction pc instr) block)
-         (let ([seen (set-add seen pc)])
-           (match instr
-             [(or (family #rx"^goto" _ offset)
-                  (family #rx"^jsr"  _ offset))
-              (let ([dest-pc (+ pc offset)])
-                (s₀ (cons dest-pc todo) seen (add-edge -> block-pc dest-pc)))]
-             [(family #rx"^if" _ offset)
-              (let*-values ([(todo ->) (match-let ([(cons (instruction pc _) _) block])
-                                         (values (cons pc todo)
-                                                 (add-edge -> block-pc pc)))]
-                            [(todo ->) (let ([dest-pc (+ pc offset)])
-                                         (values (cons dest-pc todo)
-                                                 (add-edge -> block-pc dest-pc)))])
-                (s₀ todo seen ->))]
-             [`(lookupswitch ,default-offset ,pairs)
-              (let-values ([(todo ->) (for/fold ([todo todo] [-> ->])
-                                                ([pair (in-list pairs)])
-                                        (match-let ([(list _ offset) pair])
-                                          (let ([dest-pc (+ pc offset)])
-                                            (values (cons dest-pc todo)
-                                                    (add-edge -> block-pc dest-pc)))))])
-                (s₀ todo seen ->))]
-             [`(tableswitch ,default-offset ,_ ,_ ,offsets)
-              (let*-values ([(todo ->) (let ([dest-pc (+ pc default-offset)])
-                                         (values (cons dest-pc todo) (add-edge -> block-pc dest-pc)))]
-                            [(todo ->) (for/fold ([todo todo] [-> ->])
-                                                 ([offset (in-list offsets)])
-                                         (let ([dest-pc (+ pc offset)])
-                                           (values (cons dest-pc todo) (add-edge -> block-pc dest-pc))))])
-                (s₀ todo seen ->))]
-             [(family #rx"return$" _)
-              (s₀ todo seen ->)]
-             [(family #rx"throw$" _)
-              (s₀ todo seen ->)]
-             [_
-              (if (and (set-member? jump-destinations pc) (not (= pc block-pc)))
-                (s₁ todo seen (add-edge -> block-pc pc) pc block)
-                (s₁ todo seen -> block-pc block))]))]))
-    (let* ([goto (s₀ (list 0) (seteqv) (hasheqv))]
-           [comefrom (for*/fold ([<- (hasheqv)]) ([(src-pc dst-pcs) (in-hash goto)]
-                                                  [dst-pc (in-list dst-pcs)])
-                       (add-edge <- dst-pc src-pc))])
-      (values goto comefrom)))
-  (define (blocks goto)
-    (set-add (apply seteqv (apply append (hash-values goto))) 0))
-  (define (dominators goto comefrom)
-    (let* ([blocks (blocks goto)]
-           [non-root-blocks (set-remove blocks 0)])
-      (define dominators
-        (let ([dominators (for/hasheqv ([n (in-set non-root-blocks)])
-                            (values n blocks))])
-          (hash-set dominators 0 (seteqv 0))))
-      (let loop ([dominators dominators])
-        (let-values ([(dominators changed?)
-                      (for/fold ([dominators dominators]
-                                 [changed? #f])
-                                ([n (in-set non-root-blocks)])
-                        (let ([d (set-add (for/fold ([d blocks]) ([pred-n (in-list (hash-ref comefrom n))])
-                                            (set-intersect d (hash-ref dominators pred-n)))
-                                          n)])
-                          (values (hash-set dominators n d) (or changed? (not (equal? d (hash-ref dominators n)))))))])
-          (if changed? (loop dominators) dominators)))))
-  
-  (let-values ([(goto comefrom) (jumps (code-bytecode (cdr (assq 'Code (jvm-method-attributes m)))))])
-    ((current-print) goto)
-
-    (define (loop-body en ex)
-      (let loop ([body (seteqv en)]
-                 [todo (list ex)])
-        (match todo
-          [(list) body]
-          [(cons n todo)
-           (if (set-member? body n)
-             (loop body todo)
-             (loop (set-add body n)
-                   (for/fold ([todo todo]) ([n (in-list (hash-ref comefrom n))])
-                     (set-add todo n))))])))
-    
-    (let ([dominators (dominators goto comefrom)])
-
-      (for/hasheqv ([b (in-set (blocks goto))])
-        (let ([d (hash-ref dominators b)])
-          (values b (for/list ([succ-b (hash-ref goto b null)]
-                               #:when (set-member? d succ-b))
-                      (loop-body succ-b b)))))
-      
-      #;
-      (for/fold ([loops (hash)])
-                ([b (in-set (blocks goto))])
-        (define headers
-          (let ([dominators (hash-ref dominators b)])
-            (for/list ([succ-b (hash-ref goto b null)]
-                       #:when (set-member? dominators succ-b))
-              succ-b)))
-
-        (for/fold ([loops loops]) ([header (in-list headers)])
-          (hash-update loops header (λ (body) (append body (loop-body header b))) null))))))
+         costs]))
+    (define (s₁ block locals stack simple-cost etc)
+      (let ([simple-cost (add1 simple-cost)])
+        (match block
+          [(cons (instruction pc instr) block)
+           (if (and (set-member? jump-destinations pc) (not (= simple-cost 1)))
+             (values (list pc) simple-cost (cons pc etc))
+             (match instr
+               [(or (family #rx"^goto" _ offset)
+                    (family #rx"^jsr"  _ offset))
+                (let ([dest-pc (+ pc offset)])
+                  (values (list dest-pc) simple-cost (cons dest-pc etc)))]
+               [(family #rx"^if" opcode offset)
+                (let ([dest-pc (+ pc offset)]
+                      [succ-pc (match-let ([(cons (instruction pc _) _) block]) pc)])
+                  (match-let ([(cons v stack) stack])
+                    (values (list succ-pc dest-pc) simple-cost (cons `(if (,opcode ,v) ,dest-pc ,succ-pc) etc))))]
+               [`(lookupswitch ,default-offset ,pairs)
+                (values (cons (+ pc default-offset)
+                              (for/list ([pair (in-list pairs)])
+                                (match-let ([(list _ offset) pair])
+                                  (+ pc offset))))
+                        simple-cost
+                        (cons `(lookupswitch ,(+ pc default-offset)
+                                             ,(for/list ([pair (in-list pairs)])
+                                                (match-let ([(list x offset) pair])
+                                                  (list x (+ pc offset)))))
+                              etc))]
+               [`(tableswitch ,default-offset ,hi ,lo ,offsets)
+                (values (cons (+ pc default-offset) (map (λ (offset) (+ pc offset)) offsets))
+                        simple-cost
+                        (cons `(tableswitch ,(+ pc default-offset) ,hi ,lo ,(map (λ (offset) (+ pc offset)) offsets)) etc))]
+               ['return
+                (values null simple-cost (cons 'return etc))]
+               [(family #rx".return$" opcode)
+                (match stack
+                  [(cons v stack)
+                   (values null simple-cost (cons `(,opcode ,v) etc))]
+                  [(list)
+                   (values null simple-cost (cons `(,opcode (stack -1)) etc))])]
+               ['athrow
+                (match-let ([(cons objectref stack) stack])
+                  (values null simple-cost (cons `(athrow ,objectref) etc)))]
+               [(family #rx"^(a|d|f|i|l)load$" opcode n)
+                (let ([stack (cons (vector-ref locals n) stack)])
+                  (s₁ block locals stack simple-cost etc))]
+               [`(iconst ,i)
+                (let ([stack (cons i stack)])
+                  (s₁ block locals stack simple-cost etc))]
+               [`(dconst ,i)
+                (let ([stack (cons (exact->inexact i) stack)])
+                  (s₁ block locals stack simple-cost etc))]
+               [`(lconst ,l)
+                (let ([stack (cons l stack)])
+                  (s₁ block locals stack simple-cost etc))]
+               #;
+               [(family #rx"^(d|f|i|l)const$" opcode n)
+                (list opcode n)]
+               [(family #rx"^iinc$" opcode index constant)
+                (let ([v (vector-ref locals index)])
+                  (if (integer? v)
+                    (vector-set! locals index (+ v constant))
+                    (vector-set! locals index `(+ ,v ,constant))))
+                (s₁ block locals stack simple-cost etc)]
+               [(family #rx"^(a|d|f|i|l)store$" opcode n)
+                (match-let ([(cons v stack) stack])
+                  (vector-set! locals n v)
+                  (s₁ block locals stack simple-cost etc))]
+               #;
+               [(family #rx"^if(eq|ge|gt|le|lt|ne|nonnull|null)" opcode offset)
+                (list opcode offset)]
+               #;
+               [(family #rx"^if-acmp(eq|ne)$" opcode offset)
+                (list opcode offset)]
+               #;
+               [(family #rx"^if-icmp(eq|ge|gt|le|lt|ne)$" opcode offset)
+                (list opcode offset)]
+               #;
+               [`(anewarray ,type)
+                (match-let ([(cons count stack) stack])
+                  (let ([stack (cons `(a))]))
+                  )
+                `(anewarray ,(look-up-constant index constant-pool))]
+               [`(bipush ,i)
+                (let ([stack (cons i stack)])
+                  (s₁ block locals stack simple-cost etc))]
+               [`(checkcast ,class)
+                (match-let* ([(cons objectref stack) stack]
+                             [stack (cons `(checkcast ,objectref ,class) stack)])
+                  (s₁ block locals stack simple-cost etc))]
+               #;
+               [`(goto ,offset)
+                `(goto ,offset)]
+               [`(ldc ,v)
+                (let ([stack (cons v stack)])
+                  (s₁ block locals stack simple-cost etc))]
+               #;
+               [`(ldc-w ,index)
+                `(ldc-w ,(look-up-constant index constant-pool))]
+               [`(ldc2-w ,v)
+                (let ([stack (cons v stack)])
+                  (s₁ block locals stack simple-cost etc))]
+               #;
+               [`(lookupswitch ,de ,offsets)
+                `(lookupswitch ,de ,offsets)]
+               #;
+               [`(jsr ,offset)
+                `(jsr ,offset)]
+               #;
+               [`(multianewarray ,index ,count)
+                `(multianewarray ,(look-up-constant index constant-pool) ,count)]
+               [`(new ,class)
+                (let ([stack (cons `(new ,class) stack)])
+                  (s₁ block locals stack simple-cost etc))]
+               [`(newarray ,type)
+                (match-let ([(cons count stack) stack])
+                  (let ([stack (cons `(newarray ,type ,count) stack)])
+                    (s₁ block locals stack simple-cost etc)))]
+               #;
+               [`(ret ,offset)
+                `(ret ,offset)]
+               [`(sipush ,i)
+                (let ([stack (cons i stack)])
+                  (s₁ block locals stack simple-cost etc))]
+               #;
+               [`(tableswitch ,de ,lo ,hi ,offsets)
+                `(tableswitch ,de ,lo ,hi ,offsets)]
+               #;
+               [`(wide-iinc ,index ,const)
+                `(wide-iinc ,index ,const)]
+               #;
+               [`(instanceof ,index)
+                `(instanceof ,(look-up-constant index constant-pool))]
+               #;
+               [`(invokeinterface ,index ,count)
+                `(invokeinterface ,(look-up-constant index constant-pool) ,count)]
+               [`(invokeinterface ,method ,count)
+                (match-let ([(cons objectref stack) stack])
+                  (let-values ([(arguments stack) (match-let ([(methodref _ (name-and-type _ descriptor)) method])
+                                                    (perform-descriptor descriptor stack))])
+                    (s₁ block locals stack simple-cost (cons `(invokeinterface ,objectref ,method ,arguments) etc))))]
+               [`(invokespecial ,method)
+                (match-let ([(cons objectref stack) stack])
+                  (let-values ([(arguments stack) (match-let ([(methodref _ (name-and-type _ descriptor)) method])
+                                                    (perform-descriptor descriptor stack))])
+                    (s₁ block locals stack simple-cost (cons `(invokespecial ,objectref ,method ,arguments) etc))))]
+               [`(invokestatic ,method)
+                (let-values ([(arguments stack) (match-let ([(methodref _ (name-and-type _ descriptor)) method])
+                                                  (perform-descriptor descriptor stack))])
+                  (s₁ block locals stack simple-cost (cons `(invokestatic ,method ,arguments) etc)))]
+               [`(invokevirtual ,method)
+                (match-let ([(cons objectref stack) stack])
+                  (let-values ([(arguments stack) (match-let ([(methodref _ (name-and-type _ descriptor)) method])
+                                                    (perform-descriptor descriptor stack))])
+                    (s₁ block locals stack simple-cost (cons `(invokevirtual ,objectref ,method ,arguments) etc))))]
+               [`(getfield ,field)
+                (match-let* ([(cons objectref stack) stack]
+                             [stack (cons `(getfield ,objectref ,field) stack)])
+                  (displayln "getting an instance field; should keep track of gets and puts")
+                  (s₁ block locals stack simple-cost etc))]
+               [`(putfield ,field)
+                (match-let ([(list* objectref v stack) stack])
+                  (displayln "putting an instance field; should keep track of gets and puts")
+                  (s₁ block locals stack simple-cost etc))]
+               #;
+               [`(putfield ,index)
+                `(putfield ,(look-up-constant index constant-pool))]
+               [`(getstatic ,field)
+                (let ([stack (cons `(getstatic ,field) stack)])
+                  (printf "UNSOUND: need to track putstatic\n")
+                  (s₁ block locals stack simple-cost etc))]
+               [`(putstatic ,field)
+                (match-let ([(cons v stack) stack])
+                  (printf "EFFECT: ~a\n" `(putstatic ,field ,v))
+                  (s₁ block locals stack simple-cost etc))]
+               [(family #rx".aload$" opcode)
+                (match-let ([(list* arrayref index stack) stack])
+                  (let ([stack (cons `(,opcode ,arrayref ,index) stack)])
+                    (s₁ block locals stack simple-cost etc)))]
+               ['aconst-null
+                (let ([stack (cons 'null stack)])
+                  (s₁ block locals stack simple-cost etc))]
+               ['arraylength
+                (match-let ([(cons arrayref stack) stack])
+                  (let ([stack (cons `(arraylength ,arrayref) stack)])
+                    (s₁ block locals stack simple-cost etc)))]
+               ['dup
+                (match-let* ([(cons v stack) stack]
+                             [stack (list* v v stack)])
+                  (s₁ block locals stack simple-cost etc))]
+               ['dup2
+                (match-let ([(list* v₀ v₁ stack) stack])
+                  (printf "POSSIBLY UNSOUND if ~v is a long or double\n" v₀)
+                  (let ([stack (list* v₀ v₁ v₀ v₁ stack)])
+                    (s₁ block locals stack simple-cost etc)))]
+               ['iastore
+                (match-let ([(list* arrayref index value stack) stack])
+                  (printf "EFFECT: ~a\n" `(iastore ,arrayref ,index ,value))
+                  (s₁ block locals stack simple-cost etc))]
+               ['pop
+                (match-let ([(cons v stack) stack])
+                  (s₁ block locals stack simple-cost etc))]
+               ; unary operators
+               [(and opcode (or 'd2l
+                                'dneg
+                                'i2d 'i2l
+                                'l2d))
+                (match-let* ([(list* v stack) stack]
+                             [stack (cons `(,opcode ,v) stack)])
+                  (s₁ block locals stack simple-cost etc))]
+               ; binary operators
+               [(and opcode (or 'dcmpg 'dcmpl
+                                'dadd 'ddiv 'dmul
+                                'iadd 'iand 'idiv 'imul 'isub
+                                'ladd 'lmul))
+                (match-let* ([(list* v₀ v₁ stack) stack]
+                             [stack (cons `(,opcode ,v₀ ,v₁) stack)])
+                  (s₁ block locals stack simple-cost etc))]
+               #;
+               [(and opcode (or 'aaload 'aastore 'aconst-null 'areturn 'arraylength 'athrow
+                                'baload 'bastore
+                                'caload 'castore
+                                'd2f 'd2i 'd2l 'dadd 'daload 'dastore 'dcmpg 'dcmpl 'ddiv 'dmul 'dneg 'dreturn 'dsub 'dup 'dup2 'dup2-x1 'dup-x1 'dup-x2
+                                'f2d 'f2i 'f2l 'fadd 'faload 'fastore 'fcmpg 'fcmpl 'fdiv 'fmul 'freturn 'fsub
+                                'i2b 'i2c 'i2d 'i2f 'i2l 'i2s 'iadd 'iaload 'iand 'iastore 'idiv 'imul 'ineg 'ior 'irem 'ireturn 'ishl 'ishr 'isub 'iushr 'ixor
+                                'l2d 'l2f 'l2i 'ladd 'land 'laload 'lastore 'lcmp 'ldiv 'lmul 'lneg 'lor 'lrem 'lreturn 'lshl 'lshr 'lsub 'lushr 'lxor
+                                'monitorenter 'monitorexit
+                                'pop 'pop2
+                                'return
+                                'saload 'sastore))
+                opcode]
+               ))])))
+    (s₀ (list 0) (seteqv) (hasheqv)))
+  (costs bytecode))
     
     
 
