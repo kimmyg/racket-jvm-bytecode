@@ -3,14 +3,14 @@
          racket/set
          "data.rkt"
          "instruction.rkt"
+         "symbolic-locals.rkt"
          "symbolic-stack.rkt"
          (submod "descriptor.rkt" stack-action))
 
-(define (loops m)
+(define (summaries m)
   (match-define (code max-stack max-locals bytecode exception-table attributes)
     (cdr (assq 'Code (jvm-method-attributes m))))
   (define (costs instrs)
-    #;((current-print) instrs) 
     (define jump-destinations
       (for/fold ([jds (seteqv)]) ([instr (in-list instrs)])
         (match instr
@@ -37,22 +37,30 @@
                  instrs*)]
           [(list)
            sequences])))
-    (define (s₀ todo seen costs)
+    (define (add-edge -> pc₀ pc₁)
+      (hash-update -> pc₀ (λ (pcs) (cons pc₁ pcs)) null))
+    (define (s₀ todo seen costs <-)
       (match todo
         [(cons pc todo)
          (if (set-member? seen pc)
-           (s₀ todo seen costs)
-           (let-values ([(more-todo simple-cost etc) (s₁ (hash-ref sequences pc) (apply vector (build-list max-locals (λ (i) `(local ,i)))) (make-empty-stack) 0 null)])
-             (s₀ (append more-todo todo) (set-add seen pc) (hash-set costs pc (list simple-cost etc)))))]
+           (s₀ todo seen costs <-)
+           (let-values ([(more-todo simple-cost locals-summary stack-summary effects final)
+                         (s₁ (hash-ref sequences pc) (make-locals max-locals) (make-stack max-stack) 0 null)])
+             (s₀ (append more-todo todo)
+                 (set-add seen pc)
+                 (hash-set costs pc (list simple-cost locals-summary stack-summary effects final))
+                 (for/fold ([<- <-]) ([dest-pc (in-list more-todo)])
+                   (add-edge <- dest-pc pc)))))]
         [(list)
-         costs]))
-    (define (s₁ block locals stack simple-cost etc)
+         (values costs <-)]))
+    (define (s₁ block locals stack simple-cost effects)
       (define (s₂ pc instr not-done done)
         (match instr
           [(or (family #rx"^goto" _ offset)
-               (family #rx"^jsr"  _ offset))
+               #;(family #rx"^jsr"  _ offset)
+               )
            (let ([dest-pc (+ pc offset)])
-             (done (list dest-pc) dest-pc))]
+             (done (list dest-pc) `(goto , dest-pc)))]
           [(family #rx"^if-icmp(eq|ge|gt|le|lt|ne)$" opcode offset succ-pc)
            (let ([dest-pc (+ pc offset)])
              (match-define (list v₀ v₁) (stack-pop!* stack 2))
@@ -77,12 +85,12 @@
            (done null 'return)]
           [(family #rx".return$" opcode)
            (define v (stack-pop! stack))
-           (done null `(,opcode ,v))]
+           (done null `(return ,opcode ,v))]
           ['athrow
            (define objectref (stack-pop! stack))
            (done null `(athrow ,objectref))]
           [(family #rx"^(a|d|f|i|l)load$" opcode n)
-           (stack-push! stack (vector-ref locals n))
+           (stack-push! stack (locals-ref locals n))
            (not-done #f)]
           [`(iconst ,i)
            (stack-push! stack i)
@@ -97,14 +105,14 @@
           [(family #rx"^(d|f|i|l)const$" opcode n)
            (list opcode n)]
           [(family #rx"^iinc$" opcode index constant)
-           (let ([v (vector-ref locals index)])
+           (let ([v (locals-ref locals index)])
              (if (integer? v)
-               (vector-set! locals index (+ v constant))
-               (vector-set! locals index `(+ ,v ,constant))))
+               (locals-set! locals index (+ v constant))
+               (locals-set! locals index `(+ ,v ,constant))))
            (not-done #f)]
           [(family #rx"^(a|d|f|i|l)store$" opcode n)
            (define v (stack-pop! stack))
-           (vector-set! locals n v)
+           (locals-set! locals n v)
            (not-done #f)]
                #;
                [(family #rx"^if(eq|ge|gt|le|lt|ne|nonnull|null)" opcode offset)
@@ -210,10 +218,10 @@
            (match-define (list arrayref index) (stack-pop!* stack 2))
            (define token (gensym 'token))
            (stack-push! stack `(access-token ,token))
-           (not-done `(,opcode ,arrayref ,index ,token))]
+           (not-done `(aload ,opcode ,arrayref ,index ,token))]
           [(family #rx".astore$" opcode)
            (match-define (list arrayref index value) (stack-pop!* stack 3))
-           (not-done `(,opcode ,arrayref ,index ,value))]
+           (not-done `(astore ,opcode ,arrayref ,index ,value))]
           ['aconst-null
            (stack-push! stack 'null)
            (not-done #f)]
@@ -272,12 +280,73 @@
       (match block
         [(cons (instruction pc instr) block)
          (if (and (set-member? jump-destinations pc) (not (zero? simple-cost)))
-           (values (list pc) simple-cost (cons pc etc))
+           (values (list pc)
+                   simple-cost
+                   (locals-summary locals)
+                   (make-stack-summary stack)
+                   effects
+                   `(goto ,pc))
            (let ([simple-cost (add1 simple-cost)])
              (s₂ pc instr
-                 (λ (c) (s₁ block locals stack simple-cost (if c (cons c etc) etc)))
-                 (λ (more-todo c) (values more-todo simple-cost (if c (cons c etc) etc))))))]))
+                 (λ (e) (s₁ block locals stack simple-cost (if e (cons e effects) effects)))
+                 (λ (more-todo final)
+                   (values more-todo
+                           simple-cost
+                           (locals-summary locals)
+                           (make-stack-summary stack)
+                           effects
+                           final)))))]))
+
+    (define (reduce costs <-)
+      (let loop ([todo (list 0)]
+                 [h (hasheqv)])
+        (match todo
+          [(list) h]
+          [(cons pc todo)
+           (if (hash-has-key? h pc)
+             (loop todo h)
+             (let loop₂ ([summary (hash-ref costs pc)])
+               (match-let ([(list simple-cost locals-summary stack-summary effects final) summary])
+                 (match final
+                   [`(goto ,dest-pc)
+                    (if (null? (remv pc (hash-ref <- dest-pc)))
+                      (match-let ([(list simple-cost₁ locals-summary₁ stack-summary₁ effects₁ final)  (hash-ref costs dest-pc)])
+                        (displayln "MERGING!")
+                        (loop₂ (list (+ simple-cost₁ simple-cost)
+                                     (locals-summary-sequence locals-summary₁ locals-summary)
+                                     (stack-summary-sequence stack-summary₁ stack-summary)
+                                     (append effects₁ effects)
+                                     final)))
+                      (loop (cons dest-pc todo) (hash-set h pc summary)))]
+                   ['return
+                    (loop todo (hash-set h pc summary))]
+                   [`(return . ,_)
+                    (loop todo (hash-set h pc summary))]
+                   [`(athrow . ,_)
+                    (loop todo (hash-set h pc summary))]
+                   [`(branch ,_ ,jump-pc ,succ-pc)
+                    (loop (list* jump-pc succ-pc todo) (hash-set h pc summary))]
+                   [`(lookupswitch ,default-pc ,pairs)
+                    (loop (for/fold ([todo (cons default-pc todo)])
+                                    ([pair (in-list pairs)])
+                            (match-let ([(list _ dest-pc) pair])
+                              (cons dest-pc todo)))
+                          (hash-set h pc summary))]
+                   [`(tableswitch ,default-pc ,_ ,_ ,dest-pcs)
+                    (loop (for/fold ([todo (cons default-pc todo)])
+                                    ([dest-pc (in-list dest-pcs)])
+                            (cons dest-pc todo))
+                          (hash-set h pc summary))]))))])))
+
+    (call-with-values (λ () (s₀ (list 0) (seteqv) (hasheqv) (hasheqv))) reduce)
+    
+    #;
     (define (reduce h)
+      
+      #;
+      (for/fold ([h (hasheqv)]
+                 [fold]))
+      #;
       h
       #;
       (for/hasheqv ([(pc summary) (in-hash h)])
@@ -308,15 +377,14 @@
       (let-values ([(key value) (hash-iterate-key+value h (hash-iterate-first h))])
         (match value))
       
-      )
-    (reduce (s₀ (list 0) (seteqv) (hasheqv))))
+      ))
   (costs bytecode))
     
     
 
 
 
-(provide loops)
+(provide summaries)
 
 
 #|

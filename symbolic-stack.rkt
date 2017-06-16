@@ -3,7 +3,7 @@
 
 (struct SS (offset array) #:mutable)
 
-(define (make-empty-stack)
+(define (make-stack max-stack)
   (SS 0 null))
 
 (define (stack-push! s . vs)
@@ -34,4 +34,18 @@
   (match-define (list v) (stack-pop!* s 1))
   v)
 
-(provide make-empty-stack stack-push! stack-pop! stack-pop!*)
+(struct stack-summary (offset array) #:transparent)
+
+(define make-stack-summary
+  (match-lambda
+    [(SS offset array)
+     (stack-summary offset array)]))
+
+(define (stack-summary-sequence ss₀ . sss)
+  (match sss
+    [(list) ss₀]
+    [(cons ss sss)
+     (apply stack-summary-sequence `(sequence ,ss₀ ,ss) sss)]))
+
+(provide make-stack stack-push! stack-pop! stack-pop!*
+         (struct-out stack-summary) make-stack-summary stack-summary-sequence)
