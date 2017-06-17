@@ -32,16 +32,19 @@
     [(list m) m]
     [_ (error 'method/name "multiple methods with name ~s" name)]))
 
-(require "summary.rkt")
+(require "summary.rkt"
+         "loops.rkt")
 
-(require "descriptor.rkt")
+
 
 (for* ([c (in-list classes)]
        [m (in-list (jvm-class-methods c))]
        #:when (assq 'Code (jvm-method-attributes m)))
   ((current-print) (jvm-class-this c))
   ((current-print) (jvm-method-name m))
-  ((current-print) (summaries m)))
+  (define-values (summaries ->) (summarize m))
+  ((current-print) ->)
+  ((current-print) (loops -> (reverse ->))))
 
 #;
 (match (classes-with-main classes)

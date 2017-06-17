@@ -7,10 +7,18 @@
          "symbolic-stack.rkt"
          (submod "descriptor.rkt" stack-action))
 
-(define (summaries m)
+(define (add-edge -> pc₀ pc₁)
+  (hash-update -> pc₀ (λ (pcs) (cons pc₁ pcs)) null))
+
+(define (reverse ->)
+  (for*/fold ([<- (hasheqv)]) ([(pc dest-pcs) (in-hash ->)]
+                               [dest-pc (in-list dest-pcs)])
+    (add-edge <- dest-pc pc)))
+
+(define (summarize m)
   (match-define (code max-stack max-locals bytecode exception-table attributes)
     (cdr (assq 'Code (jvm-method-attributes m))))
-  (define (costs instrs)
+  (define (summaries instrs)
     (define jump-destinations
       (for/fold ([jds (seteqv)]) ([instr (in-list instrs)])
         (match instr
@@ -37,22 +45,20 @@
                  instrs*)]
           [(list)
            sequences])))
-    (define (add-edge -> pc₀ pc₁)
-      (hash-update -> pc₀ (λ (pcs) (cons pc₁ pcs)) null))
-    (define (s₀ todo seen costs <-)
+    (define (s₀ todo seen costs ->)
       (match todo
         [(cons pc todo)
          (if (set-member? seen pc)
-           (s₀ todo seen costs <-)
+           (s₀ todo seen costs ->)
            (let-values ([(more-todo simple-cost locals-summary stack-summary effects final)
                          (s₁ (hash-ref sequences pc) (make-locals max-locals) (make-stack max-stack) 0 null)])
              (s₀ (append more-todo todo)
                  (set-add seen pc)
                  (hash-set costs pc (list simple-cost locals-summary stack-summary effects final))
-                 (for/fold ([<- <-]) ([dest-pc (in-list more-todo)])
-                   (add-edge <- dest-pc pc)))))]
+                 (for/fold ([-> ->]) ([dest-pc (in-list more-todo)])
+                   (add-edge -> pc dest-pc)))))]
         [(list)
-         (values costs <-)]))
+         (values costs ->)]))
     (define (s₁ block locals stack simple-cost effects)
       (define (s₂ pc instr not-done done)
         (match instr
@@ -337,54 +343,10 @@
                                     ([dest-pc (in-list dest-pcs)])
                             (cons dest-pc todo))
                           (hash-set h pc summary))]))))])))
+    (s₀ (list 0) (seteqv) (hasheqv) (hasheqv)))
+  (summaries bytecode))
 
-    (call-with-values (λ () (s₀ (list 0) (seteqv) (hasheqv) (hasheqv))) reduce)
-    
-    #;
-    (define (reduce h)
-      
-      #;
-      (for/fold ([h (hasheqv)]
-                 [fold]))
-      #;
-      h
-      #;
-      (for/hasheqv ([(pc summary) (in-hash h)])
-        (match-let ([(list simple-cost (cons r es)) summary])
-          (values pc `(+ ,simple-cost ,r . ,(let loop ([es es])
-                                           (match es
-                                             [(cons e es)
-                                              (match e
-                                                [(or `(invokespecial ,_ ,method ,_ ,_)
-                                                     `(invokestatic ,method ,_ ,_)
-                                                     `(invokevirtual ,_ ,method ,_ ,_)
-                                                     `(invokeinterface ,_ ,method ,_ ,_))
-                                                 (cons (equal-hash-code e) (loop es))]
-                                                [(or `(getstatic . ,_)
-                                                     `(putstatic . ,_)
-                                                     `(getfield . ,_)
-                                                     `(putfield . ,_)
-                                                     `(aastore . ,_)
-                                                     `(bastore . ,_)
-                                                     `(iaload . ,_)
-                                                     `(iastore . ,_)
-                                                     `(aaload . ,_)
-                                                     `(baload . ,_))
-                                                 (loop es)])]
-                                             [(list) (list)]))
-                         ))))
-      #;
-      (let-values ([(key value) (hash-iterate-key+value h (hash-iterate-first h))])
-        (match value))
-      
-      ))
-  (costs bytecode))
-    
-    
-
-
-
-(provide summaries)
+(provide reverse summarize)
 
 
 #|
