@@ -58,7 +58,7 @@
                  (for/fold ([-> ->]) ([dest-pc (in-list more-todo)])
                    (add-edge -> pc dest-pc)))))]
         [(list)
-         (values costs ->)]))
+         (values costs -> (reverse ->))]))
     (define (s₁ block locals stack simple-cost effects)
       (define (s₂ pc instr not-done done)
         (match instr
@@ -303,6 +303,7 @@
                            effects
                            final)))))]))
 
+    #;
     (define (reduce costs <-)
       (let loop ([todo (list 0)]
                  [h (hasheqv)])
@@ -346,8 +347,66 @@
     (s₀ (list 0) (seteqv) (hasheqv) (hasheqv)))
   (summaries bytecode))
 
-(provide reverse summarize)
+(define (resolve-condition effects condition)
+  (match-let ([(list conditional operand) condition])
+    (list conditional (match operand
+                        [`(result ,token ,_)
+                         (findf
+                          (match-lambda
+                            [(list _ ... (== token)) #t]
+                            [_ #f])
+                          (effect-calls effects))]))))
 
+(define (path-condition summaries blocks)
+  (for/fold ([pcs (hasheqv)]) ([pc (in-set blocks)])
+    (match-let ([(list simple-cost locals-summary stack-summary effects final) (hash-ref summaries pc)])
+      (match final
+        [`(branch ,condition ,jump-pc ,succ-pc)
+         (let ([condition (resolve-condition effects condition)])
+           (hash-set pcs pc
+                     (cond
+                       [(and (set-member? blocks jump-pc)
+                             (set-member? blocks succ-pc))
+                        `(ind ,condition)]
+                       [(set-member? blocks jump-pc)
+                        `(pos ,condition)]
+                       [(set-member? blocks succ-pc)
+                        `(neg ,condition)]
+                       [else
+                        `(exi ,condition)])))]
+        [`(goto ,_) pcs]))))
+
+(require racket/list)
+
+(define (effect-calls effects)
+  (filter-map
+   (λ (e)
+     (match e
+       [(cons (app symbol->string (regexp #rx"^invoke")) _) e]
+       [_ #f]))
+   effects))
+
+(define summary-calls
+  (match-lambda
+    [(list simple-cost locals-summary stack-summary effects final)
+     (effect-calls effects)]))
+
+(provide summarize
+         path-condition
+         summary-calls)
+
+(define (dotfile m -> summaries)
+  (let ([path (string-append (regexp-replace* #px"\\W" (jvm-method-name m) "") ".v")])
+    (unless (file-exists? path)
+      (call-with-output-file path
+        (λ (op)
+          (displayln "digraph G {" op)
+          (for* ([(pc succ-pcs) (in-hash ->)]
+                 [succ-pc (in-list succ-pcs)])
+            (fprintf op "  ~a -> ~a;\n" pc succ-pc))
+          (displayln "}" op))))))
+
+(provide dotfile)
 
 #|
 
