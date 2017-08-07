@@ -2,18 +2,15 @@
 (require racket/match
          racket/set
          "data.rkt"
+         "cfg.rkt"
          "instruction.rkt"
          "symbolic-locals.rkt"
          "symbolic-stack.rkt"
          (submod "descriptor.rkt" stack-action))
 
-(define (add-edge -> pc₀ pc₁)
-  (hash-update -> pc₀ (λ (pcs) (cons pc₁ pcs)) null))
 
-(define (reverse ->)
-  (for*/fold ([<- (hasheqv)]) ([(pc dest-pcs) (in-hash ->)]
-                               [dest-pc (in-list dest-pcs)])
-    (add-edge <- dest-pc pc)))
+
+(struct summary (simple-cost locals-summary stack-summary effects final) #:transparent)
 
 (define (summarize m)
   (match-define (code max-stack max-locals bytecode exception-table attributes)
@@ -54,11 +51,11 @@
                          (s₁ (hash-ref sequences pc) (make-locals max-locals) (make-stack max-stack) 0 null)])
              (s₀ (append more-todo todo)
                  (set-add seen pc)
-                 (hash-set costs pc (list simple-cost locals-summary stack-summary effects final))
+                 (hash-set costs pc (summary simple-cost locals-summary stack-summary effects final))
                  (for/fold ([-> ->]) ([dest-pc (in-list more-todo)])
                    (add-edge -> pc dest-pc)))))]
         [(list)
-         (values costs -> (reverse ->))]))
+         (values costs -> (cfg-reverse ->))]))
     (define (s₁ block locals stack simple-cost effects)
       (define (s₂ pc instr not-done done)
         (match instr
@@ -114,7 +111,7 @@
            (let ([v (locals-ref locals index)])
              (if (integer? v)
                (locals-set! locals index (+ v constant))
-               (locals-set! locals index `(+ ,v ,constant))))
+               (locals-set! locals index `(binop ,opcode ,v ,constant))))
            (not-done #f)]
           [(family #rx"^(a|d|f|i|l)store$" opcode n)
            (define v (stack-pop! stack))
@@ -239,6 +236,10 @@
            (define v (stack-pop! stack))
            (stack-push! stack v v)
            (not-done #f)]
+          ['dup-x1
+           (match-define (list v₀ v₁) (stack-pop!* stack 2))
+           (stack-push! stack v₀ v₁ v₀)
+           (not-done #f)]
           ['dup2
            (match-define (list v₀ v₁) (stack-pop!* stack 2))
            (stack-push! stack v₀ v₁ v₀ v₁)
@@ -255,19 +256,19 @@
           ; unary operators
           [(and opcode (or 'd2l
                            'dneg
-                           'i2b 'i2d 'i2l
+                           'i2b 'i2d 'i2l 'i2s
                            'l2d 'l2i))
            (define v (stack-pop! stack))
-           (stack-push! stack `(,opcode ,v))
+           (stack-push! stack `(unop ,opcode ,v))
            (not-done #f)]
           ; binary operators
           [(and opcode (or 'dcmpg 'dcmpl
                            'dadd 'ddiv 'dmul
-                           'iadd 'iand 'idiv 'imul 'ior 'isub
+                           'iadd 'iand 'idiv 'imul 'ineg 'ior 'isub 'ishl 'ishr 'iushr 'ixor
                            'lcmp
-                           'ladd 'lmul 'lsub))
+                           'land 'ladd 'lmul 'lor 'lsub 'lshl 'lshr 'lxor))
            (match-define (list v₀ v₁) (stack-pop!* stack 2))
-           (stack-push! stack `(,opcode ,v₀ ,v₁))
+           (stack-push! stack `(binop ,opcode ,v₀ ,v₁))
            (not-done #f)]
           #;
           [(and opcode (or 'aaload 'aastore 'aconst-null 'areturn 'arraylength 'athrow
@@ -302,79 +303,83 @@
                            (make-stack-summary stack)
                            effects
                            final)))))]))
-
-    #;
-    (define (reduce costs <-)
-      (let loop ([todo (list 0)]
-                 [h (hasheqv)])
-        (match todo
-          [(list) h]
-          [(cons pc todo)
-           (if (hash-has-key? h pc)
-             (loop todo h)
-             (let loop₂ ([summary (hash-ref costs pc)])
-               (match-let ([(list simple-cost locals-summary stack-summary effects final) summary])
-                 (match final
-                   [`(goto ,dest-pc)
-                    (if (null? (remv pc (hash-ref <- dest-pc)))
-                      (match-let ([(list simple-cost₁ locals-summary₁ stack-summary₁ effects₁ final)  (hash-ref costs dest-pc)])
-                        (displayln "MERGING!")
-                        (loop₂ (list (+ simple-cost₁ simple-cost)
-                                     (locals-summary-sequence locals-summary₁ locals-summary)
-                                     (stack-summary-sequence stack-summary₁ stack-summary)
-                                     (append effects₁ effects)
-                                     final)))
-                      (loop (cons dest-pc todo) (hash-set h pc summary)))]
-                   ['return
-                    (loop todo (hash-set h pc summary))]
-                   [`(return . ,_)
-                    (loop todo (hash-set h pc summary))]
-                   [`(athrow . ,_)
-                    (loop todo (hash-set h pc summary))]
-                   [`(branch ,_ ,jump-pc ,succ-pc)
-                    (loop (list* jump-pc succ-pc todo) (hash-set h pc summary))]
-                   [`(lookupswitch ,default-pc ,pairs)
-                    (loop (for/fold ([todo (cons default-pc todo)])
-                                    ([pair (in-list pairs)])
-                            (match-let ([(list _ dest-pc) pair])
-                              (cons dest-pc todo)))
-                          (hash-set h pc summary))]
-                   [`(tableswitch ,default-pc ,_ ,_ ,dest-pcs)
-                    (loop (for/fold ([todo (cons default-pc todo)])
-                                    ([dest-pc (in-list dest-pcs)])
-                            (cons dest-pc todo))
-                          (hash-set h pc summary))]))))])))
     (s₀ (list 0) (seteqv) (hasheqv) (hasheqv)))
   (summaries bytecode))
 
-(define (resolve-condition effects condition)
-  (match-let ([(list conditional operand) condition])
-    (list conditional (match operand
-                        [`(result ,token ,_)
-                         (findf
-                          (match-lambda
-                            [(list _ ... (== token)) #t]
-                            [_ #f])
-                          (effect-calls effects))]))))
+(define (sequence-summary pcs summaries)
+  (define (collapse-adjacent-summaries s₀ pc₁ s₁)
+    (match* (s₀ s₁)
+      [((summary sc₀ ls₀ ss₀ e₀ f₀)
+        (summary sc₁ ls₁ ss₁ e₁ f₁))
+       (summary (+ sc₀ sc₁)
+                #f
+                (collapse-adjacent-stack-summaries ss₀ ss₁)
+                (append e₀ e₁)
+                f₁
+                #;
+                (match f₀
+                  [`(branch ,condition ,jump-pc ,succ-pc)
+                   (cond
+                     [(= pc₁ jump-pc)
+                      `(pos ,condition)]
+                     [(= pc₁ succ-pc)
+                      `(neg ,condition)]
+                     [else
+                      (error 'sequence-summary "bad jump!")])]))
+       
+       ]))
+  (define (sequence-summary* s pcs)
+    (match pcs
+      [(list) s]
+      [(cons pc pcs)
+       (sequence-summary* (collapse-adjacent-summaries s pc (hash-ref summaries pc)) pcs)]))
+  (match pcs
+    [(list) (error 'sequence-summary "expected a non-empty sequence")]
+    [(cons pc pcs) (sequence-summary* (hash-ref summaries pc) pcs)]))
 
-(define (path-condition summaries blocks)
-  (for/fold ([pcs (hasheqv)]) ([pc (in-set blocks)])
-    (match-let ([(list simple-cost locals-summary stack-summary effects final) (hash-ref summaries pc)])
-      (match final
-        [`(branch ,condition ,jump-pc ,succ-pc)
-         (let ([condition (resolve-condition effects condition)])
-           (hash-set pcs pc
-                     (cond
-                       [(and (set-member? blocks jump-pc)
-                             (set-member? blocks succ-pc))
-                        `(ind ,condition)]
-                       [(set-member? blocks jump-pc)
-                        `(pos ,condition)]
-                       [(set-member? blocks succ-pc)
-                        `(neg ,condition)]
-                       [else
-                        `(exi ,condition)])))]
-        [`(goto ,_) pcs]))))
+#;
+(define (path-summary path summaries)
+  (let ([summaries])))
+
+(provide (struct-out summary) summarize sequence-summary)
+
+#|
+(define (resolve-operand effects operand)
+  (match operand
+    [`(result ,token ,_)
+     (findf
+      (match-lambda
+        [(list _ ... (== token)) #t]
+        [_ #f])
+      (effect-calls effects))])  )
+
+(define (resolve-condition effects condition)
+  (match condition
+    [(list conditional operand)
+     (list conditional
+           (resolve-operand effects operand))]
+    [(list conditional operand₀ operand₁)
+     (list conditional
+           (resolve-operand effects operand₀)
+           (resolve-operand effects operand₁))]))
+
+(define (path-condition summaries loops path)
+  (for/list ([pc (in-list (cons #f path))]
+             [next-pc (in-list path)])
+    (if (exact-nonnegative-integer? pc)
+      (match-let ([(list simple-cost locals-summary stack-summary effects final) (hash-ref summaries pc)])
+        (match final
+          [`(branch ,condition ,jump-pc ,succ-pc)
+           (let ([condition (resolve-condition effects condition)])
+             (cond
+               [(= next-pc jump-pc)
+                `(pos ,condition)]
+               [(= next-pc succ-pc)
+                `(neg ,condition)]
+               [else
+                (error 'path-condition "not jump or succ")]))]
+        [`(goto ,_) #f]))
+      pc)))
 
 (require racket/list)
 
@@ -394,6 +399,7 @@
 (provide summarize
          path-condition
          summary-calls)
+|#
 
 (define (dotfile m -> summaries)
   (let ([path (string-append (regexp-replace* #px"\\W" (jvm-method-name m) "") ".v")])
@@ -407,196 +413,3 @@
           (displayln "}" op))))))
 
 (provide dotfile)
-
-#|
-
-  #;
-  (define block-entry-pc
-    (match-lambda
-      [(cons (instruction pc _) _) pc]))
-  #;
-  (define (block-exit-target-pcs blk succ-blk-pc) 
-    (match blk
-      [(list _ ... (instruction pc instr))
-       (match instr
-         [(family #rx"^if" _ offset)
-          (if succ-blk-pc
-            (list (+ pc offset) succ-blk-pc)
-            (error 'block-exit-target-pcs "expected a successor block PC"))]
-         [(family #rx"^goto" _ offset)
-          (list (+ pc offset))]
-         [(family #rx"^jsr" _ offset)
-          (list (+ pc offset))]
-         [(family #rx"return$" _)
-          null]
-         ['athrow
-          null]
-         [instr
-          (if succ-blk-pc
-            (list succ-blk-pc)
-            (error 'block-exit-target-pcs "expected a successor block PC for instruction ~v" instr))])]))
-  #;
-  (define bs (blocks (code-bytecode (cdr (assq 'Code (jvm-method-attributes m))))))
-  #;
-  ((current-print) bs)
-  #;
-  (let loop ([bs bs]
-             [-> (hasheqv)]
-             [<- (hasheqv)])
-    (match bs
-      [(cons b₀ (and bs₀ (cons b₁ bs₁)))
-       (let ([entry-pc (block-entry-pc b₀)]
-             [exit-pcs (block-exit-target-pcs b₀ (block-entry-pc b₁))])
-         (loop bs₀
-               (for/fold ([-> ->]) ([exit-pc (in-list exit-pcs)])
-                 (hash-update -> entry-pc (λ (pcs) (cons exit-pc pcs)) null))
-               (for/fold ([<- <-]) ([exit-pc (in-list exit-pcs)])
-                 (hash-update <- exit-pc (λ (pcs) (cons entry-pc pcs)) null))))]
-      [(list b₀)
-       (let ([entry-pc (block-entry-pc b₀)]
-             [exit-pcs (block-exit-target-pcs b₀ #f)])
-         (list (for/fold ([-> ->]) ([exit-pc (in-list exit-pcs)])
-                 (hash-update -> entry-pc (λ (pcs) (cons exit-pc pcs)) null))
-               (for/fold ([<- <-]) ([exit-pc (in-list exit-pcs)])
-                 (hash-update <- exit-pc (λ (pcs) (cons entry-pc pcs)) null))))]))
-
-
-
-
-
-
-
-
-
-    #;
-    (let loop ([-> (hasheqv)]
-               [instrs instrs]
-               [block-pc])
-      (match-let ([(cons instr instrs) instrs])
-        (match instrs
-          [(cons (instruction pc _) _)
-           (loop (link -> instr₀ pc) instrs)]
-          [(list)
-           (link -> instr₀ #f)])))
-
-    #;
-    (define (block-boundaries instrs)
-      (let loop ([boundaries (seteqv)]
-                 [instrs instrs])
-        (match instrs
-          [(cons (instruction pc₀ instr) instrs)
-           (match instr
-             [(or (family #rx"^if" _ offset)
-                  (family #rx"^goto" _ offset)
-                  (family #rx"^jsr" _ offset))
-              (loop (set-add (match instrs
-                               [(cons (instruction pc₁ _) _)
-                                (set-add boundaries pc₁)]
-                               [_
-                                boundaries])
-                             (+ pc₀ offset))
-                    instrs)]
-             []
-             [_
-              (loop boundaries instrs)])]
-          [(list)
-           boundaries]))
-      #;
-      (define (pred prev next dest-pc)
-        (match next
-          [(cons (instruction (== dest-pc) _) _) next]
-          [_ (pred (cdr prev) (cons (car prev) next) dest-pc)]))
-      #;
-      (define (succ prev next dest-pc)
-        (match next
-          [(cons (instruction (== dest-pc) _) _) next]
-          [_ (succ (cons (car next) prev) (cdr next) dest-pc)]))
-      #;
-      (let loop ([boundaries (set)]
-                 [prev null]
-                 [next instrs])
-        (match next
-          [(cons (and instr (instruction pc instr*)) next*)
-           (loop (match instr*
-                   [(or (family #rx"^if" _ offset)
-                        (family #rx"^goto" _ offset)
-                        (family #rx"^jsr" _ offset))
-                    (set-add (set-add boundaries next*)
-                             (if (< offset 0)
-                               (pred prev next (+ pc offset))
-                               (succ prev next (+ pc offset))))]
-                   [`(lookupswitch . ,rst)
-                    (raise `(lookupswitch . ,rst))]
-                   [`(table . ,rst)
-                    (raise `(tableswitch . ,rst))]
-                   [_ boundaries])
-                 (cons instr prev) next*)]
-          [(list) boundaries])))
-    #;
-    (define (block-boundaries instrs)
-      (define (pred prev next dest-pc)
-        (match next
-          [(cons (instruction (== dest-pc) _) _) next]
-          [_ (pred (cdr prev) (cons (car prev) next) dest-pc)]))
-      (define (succ prev next dest-pc)
-        (match next
-          [(cons (instruction (== dest-pc) _) _) next]
-          [_ (succ (cons (car next) prev) (cdr next) dest-pc)]))
-      (let loop ([boundaries (set)]
-                 [prev null]
-                 [next instrs])
-        (match next
-          [(cons (and instr (instruction pc instr*)) next*)
-           (loop (match instr*
-                   [(or (family #rx"^if" _ offset)
-                        (family #rx"^goto" _ offset)
-                        (family #rx"^jsr" _ offset))
-                    (set-add (set-add boundaries next*)
-                             (if (< offset 0)
-                               (pred prev next (+ pc offset))
-                               (succ prev next (+ pc offset))))]
-                   [`(lookupswitch . ,rst)
-                    (raise `(lookupswitch . ,rst))]
-                   [`(table . ,rst)
-                    (raise `(tableswitch . ,rst))]
-                   [_ boundaries])
-                 (cons instr prev) next*)]
-          [(list) boundaries])))
-    #;
-    (let ([bs (block-boundaries instrs)])
-      (let loop ([block null]
-                 [instrs instrs])
-        (match instrs
-          [(cons (and instr (instruction pc _)) instrs)
-           (if (set-member? bs pc)
-             (if (null? block)
-               (loop (cons instr block) instrs)
-               (cons (reverse block) (loop (list instr) instrs)))
-             (loop (cons instr block) instrs))]
-          [(list)
-           (list (reverse block))])))
-
-    #;
-    #;
-    (define (link₀ -> block-pc instr-pc instr succ-instr-pc instrs)
-      (match instr
-        [(or (family #rx"^if" _ offset)
-             (family #rx"^goto" _ offset)
-             (family #rx"^jsr" _ offset))
-         (let* ([-> (if succ-instr-pc (add-edge -> block-pc succ-instr-pc) ->)]
-                [-> (add-edge -> block-pc (+ instr-pc offset))])
-           (link₁ -> succ-instr-pc instrs))]
-        [_
-         (link₁ -> block-pc instrs)]))
-    #;
-    (define (link₁ -> block-pc instrs)
-      (match instrs
-        [(cons (instruction pc₀ instr₀) instrs)
-         (match instrs
-           [(cons (instruction pc₁ _) _)
-            (link₀ -> block-pc pc₀ instr₀ pc₁ instrs)]
-           [(list)
-            (link₀ -> block-pc pc₀ instr₀ #f instrs)])]
-        [(list)
-         ->]))
-|#

@@ -1,5 +1,6 @@
 #lang racket/base
-(require racket/match)
+(require racket/list
+         racket/match)
 
 (struct SS (offset array) #:mutable)
 
@@ -41,6 +42,30 @@
     [(SS offset array)
      (stack-summary offset array)]))
 
+(define collapse-adjacent-stack-summaries
+  (match-lambda**
+   [((stack-summary offset₀ array₀)
+     (stack-summary 0 (list)))
+    (stack-summary offset₀ array₀)]
+   [((stack-summary 0 (list))
+     (stack-summary offset₁ array₁))
+    (stack-summary offset₁ array₁)]
+   [((stack-summary -1 (list x))
+     (stack-summary 1 (list)))
+    (stack-summary (+ -1 1) (drop (list x) 1))]
+   [((stack-summary (? (λ (x) (<= x 0)) offset₀) array₀)
+     (stack-summary (? (λ (x) (<= x 0)) offset₁) array₁))
+    (stack-summary (+ offset₀ offset₁) (append array₁ array₀))]
+   [((stack-summary (? (λ (x) (< x 0)) offset₀) array₀)
+     (stack-summary (? (λ (x) (> x 0)) offset₁) array₁))
+    (if (<= (+ offset₀ offset₁) 0)
+      (stack-summary (+ offset₀ offset₁) (drop array₀ offset₁))
+      (failure-cont))]
+   [((stack-summary offset₀ array₀)
+     (stack-summary offset₁ array₁))
+    (raise (list 'stack-summary offset₀ array₀ offset₁ array₁))]))
+
+#;
 (define (stack-summary-sequence ss₀ . sss)
   (match sss
     [(list) ss₀]
@@ -48,4 +73,6 @@
      (apply stack-summary-sequence `(sequence ,ss₀ ,ss) sss)]))
 
 (provide make-stack stack-push! stack-pop! stack-pop!*
-         (struct-out stack-summary) make-stack-summary stack-summary-sequence)
+         (struct-out stack-summary) make-stack-summary
+         collapse-adjacent-stack-summaries #;stack-summary-sequence
+         )

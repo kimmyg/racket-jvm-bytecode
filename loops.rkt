@@ -6,26 +6,6 @@
 
 (struct loop (header-block-pc footer-block-pc) #:transparent)
 
-(define (blocks goto)
-  (set-add (apply seteqv (apply append (hash-values goto))) 0))
-
-(define (dominators goto comefrom)
-  (let* ([blocks (blocks goto)]
-         [non-root-blocks (set-remove blocks 0)])
-    (define dominators
-      (let ([dominators (for/hasheqv ([n (in-set non-root-blocks)])
-                          (values n blocks))])
-        (hash-set dominators 0 (seteqv 0))))
-    (let loop ([dominators dominators])
-      (let-values ([(dominators changed?)
-                    (for/fold ([dominators dominators]
-                               [changed? #f])
-                              ([n (in-set non-root-blocks)])
-                      (let ([d (set-add (for/fold ([d blocks]) ([pred-n (in-list (hash-ref comefrom n))])
-                                          (set-intersect d (hash-ref dominators pred-n)))
-                                        n)])
-                        (values (hash-set dominators n d) (or changed? (not (equal? d (hash-ref dominators n)))))))])
-        (if changed? (loop dominators) dominators)))))
 
 (define (loops-as-sets dominators loop-footers comefrom)
   (for/hash ([(footer-pc header-pc) (in-hash loop-footers)])
@@ -45,6 +25,7 @@
 (require racket/list)
 
 (define (loops-as-paths dominators loop-footers comefrom)
+  ((current-print) comefrom) 
   (for/hash ([(footer-pc header-pc) (in-hash loop-footers)])
     (define (extend-path pc rest)
       (cond

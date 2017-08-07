@@ -10,7 +10,22 @@
 
 (require "extract.rkt")
 
-(define app-path "/Users/kimballg/Development/STAC/challenge_programs/malware_analyzer")
+(define select
+  (match-lambda
+    [(list x) x]
+    [xs
+     (displayln "select:")
+     (for ([x (in-list xs)]
+           [i (in-naturals)])
+       (printf "~a. ~a\n" i x))
+     (list-ref xs (read))]))
+
+(require racket/runtime-path)
+(define-runtime-path apps-path "/Users/kimballg/Development/STAC/challenge_programs")
+
+(define app-path
+  (build-path apps-path (select (map path->string (directory-list apps-path)))))
+
 
 (define classes
   (for/list ([call-with-class-input-stream (in-list (extract app-path))])
@@ -34,12 +49,9 @@
 (register-classes! classes)
 
 (require "summary.rkt"
-         "loops.rkt")
+         "cfg.rkt")
 
-(define select
-  (match-lambda
-    [(list x) x]
-    [xs (error 'select "more than one: ~v" xs)]))
+
 
 (require racket/set)
 
@@ -59,14 +71,43 @@
          `(invokevirtual ,_ ,methodref ,_ ,_))
      (resolve-methodref methodref)]))
 
+(require "symbolic-locals.rkt")
+
 ; class method -> set of edges (class method parent-loop,class method)
 (define (calls c m)
-  (define-values (summaries -> <-) (summarize m))
-  (dotfile m -> summaries)
-  (define method-loops (loops -> <-))
   ((current-print) (refit (list c m)))
-  ((current-print) method-loops)
+  (define-values (summaries -> <-) (summarize m))
+  ((current-print) summaries)
   
+  #;(dotfile m -> summaries)
+  #;(define cfg-dominators (dominators -> <-))
+  #;(define method-paths (paths -> <- cfg-dominators))
+
+  #;
+  (for* ([(extent paths) (in-hash method-paths)]
+         [path (in-list paths)])
+    (define (combine subpath rest)
+      (if (null? subpath)
+        rest
+        (cons (sequence-summary subpath summaries) rest)))
+    ((current-print)
+     (let loop ([path path]
+                [subpath null])
+       (match path
+         [(list)
+          (combine (reverse subpath) (list))]
+         [(cons block-pc path)
+          (if (exact-nonnegative-integer? block-pc)
+            (loop path (cons block-pc subpath))
+            (combine (reverse subpath) (cons block-pc (loop path null))))]))))
+
+  #;
+  (for* ([(loop paths) (in-hash method-loops)]
+         [path (in-list paths)])
+
+    (when (andmap exact-nonnegative-integer? path)
+      ((current-print) (apply locals-summary-sequence (for/list ([pc (in-list path)])
+                                                        (summary-locals-summary (hash-ref summaries pc)))))))
   #;
   (for ([(loop blocks) (in-hash method-loops)])
     ((current-print) (path-condition summaries blocks)))
@@ -112,10 +153,11 @@
       [(list)
        edges])))
 
-(for* ([c (in-list classes)]
-       [m (in-list (jvm-class-methods c))]
-       #:when (assq 'Code (jvm-method-attributes m)))
-  (calls c m))
+(time
+ (for* ([c (in-list classes)]
+        [m (in-list (jvm-class-methods c))]
+        #:when (assq 'Code (jvm-method-attributes m)))
+   (calls c m)) )
 
 #;
 (let* ([c (select (classes-with-main classes))]
@@ -142,9 +184,6 @@
        edges])))
 
 ; WEB
-
-(require racket/runtime-path)
-(define-runtime-path apps-path "/Users/kimballg/Development/STAC/challenge_programs")
 
 (require web-server/servlet/web
          web-server/managers/lru
